@@ -66,3 +66,13 @@ powershell -File build.ps1
 3. 首次启动会生成 `plugins/NWNDungeon/config.yml`；改配置用 `/dungeon reload` 重载，**换 jar 必须重启**
 
 需要 Paper / Purpur 1.21+（`plugin.yml` 里 `api-version: '1.21'`）。
+
+## 许可
+
+MIT License，见 [LICENSE](LICENSE)。
+
+## 许可证
+
+MIT License —— 可以自由使用、修改、二次开发甚至商用，保留版权声明即可（详见 [LICENSE](LICENSE)）。
+
+版权所有 (c) 2026 新世界网络（New World Network）。
