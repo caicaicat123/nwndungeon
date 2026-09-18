@@ -1,5 +1,5 @@
 name: NWNDungeon
-version: 1.4.0
+version: 1.4.1
 main: nwndungeon.NWNDungeon
 api-version: '1.21'
 description: 随机副本入口与独立副本世界。按难度生成遗迹入口：铁最小、钻石最大；门前台座按钮进本，门上方与下方都是难度方块。

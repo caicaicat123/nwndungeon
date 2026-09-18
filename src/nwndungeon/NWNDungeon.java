@@ -386,7 +386,8 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
             player.playSound(player.getLocation(), Sound.ENTITY_ENDERMAN_TELEPORT, 1f, 1f);
             player.sendMessage("§5[副本]§r 进入 " + (tier == null ? entry.tier() : tier.display())
                     + " §r副本，限时 " + (tier == null ? 20 : tier.timeLimitMinutes()) + " 分钟。");
-            player.sendMessage("§7死亡会回到最近的检查点，物品不会掉落。输入 §f/dungeon leave §7离开。");
+            player.sendMessage("§7脚下的磁石平台就是第一个检查点；死亡会回到最近的检查点，物品不会掉落。");
+            player.sendMessage("§7随时可以用 §f/dungeon leave §7离开副本。");
         }
     }
 

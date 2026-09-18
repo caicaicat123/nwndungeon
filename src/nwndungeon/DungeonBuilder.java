@@ -27,7 +27,8 @@ import java.util.Random;
  *
  * 布局：大厅(0) → 战斗房(1..n-1) → 首领房(n)，房间之间由走廊相连，走廊尽头是一扇关闭的铁门。
  * 每个房间可以配多波怪：进本只刷第一波，清完一波等 3 秒刷下一波，最后一波清完才算这间完成
- * （铁门旁放石按钮 + 角落给补给箱；首领房给最终奖励 + 中央木门）。
+ * （门前地板上放石压力板 + 角落给补给箱；首领房给最终奖励 + 中央木门）。
+ * 大厅的检查点平台直接铺在出生点下面（进本第一脚就踩在检查点上），其余检查点在偶数房间西侧。
  * 怪物全部是刷出来的实体（不是刷怪笼），并设为持久化，不会自然消失。
  */
 public final class DungeonBuilder {
@@ -117,10 +118,10 @@ public final class DungeonBuilder {
             }
         }
 
-        // 检查点：大厅 + 偶数房间
+        // 检查点：大厅 + 偶数房间。大厅那块铺在出生点正下方，其余铺在房间西侧（避开 9 个刷怪点）
         if (index == 0 || index % 2 == 0) {
-            int px = rx + 3;
-            int pz = cz - 1;
+            int px = index == 0 ? rx + ROOM / 2 : rx + 3;
+            int pz = index == 0 ? oz + ROOM / 2 : cz - 1;
             for (int x = px - 1; x <= px + 1; x++) {
                 for (int z = pz - 1; z <= pz + 1; z++) {
                     set(world, x, oy, z, Material.LODESTONE);
