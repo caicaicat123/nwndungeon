@@ -12,10 +12,7 @@ import org.bukkit.boss.BarColor;
 import org.bukkit.boss.BarStyle;
 import org.bukkit.boss.BossBar;
 import org.bukkit.block.Block;
-import org.bukkit.block.BlockFace;
-import org.bukkit.block.Sign;
 import org.bukkit.block.data.Bisected;
-import org.bukkit.block.data.Powerable;
 import org.bukkit.block.data.type.Door;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
@@ -226,78 +223,16 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
         return weights.keySet().iterator().next();
     }
 
-    /** 生成一处入口：5x5 石砖平台 + 铁门 + 石按钮 + 难度方块 + 告示牌。 */
+    /** 生成一处入口：按难度生成"遗迹"建筑 + 带标记的铁门 + 难度方块（门上/门下各一块）+ 台座按钮 + 告示牌。 */
     public void buildEntrance(World world, int x, int y, int z, String tierId) {
         Tier tier = tier(tierId);
         if (tier == null) {
             return;
         }
-        for (int dx = -2; dx <= 2; dx++) {
-            for (int dz = -2; dz <= 2; dz++) {
-                set(world, x + dx, y - 1, z + dz, Material.STONE_BRICKS);
-                for (int dy = 0; dy <= 3; dy++) {
-                    if (world.getBlockAt(x + dx, y + dy, z + dz).getType() != Material.AIR) {
-                        set(world, x + dx, y + dy, z + dz, Material.AIR);
-                    }
-                }
-            }
-        }
-
-        // 铁门（上下两格）
-        placeDoor(world, x, y, z);
-
-        // 门底下的方块代表难度
-        set(world, x, y - 1, z, tier.floorBlock());
-
-        // 压力板：铺在门前的地板上（玩家走近门就会踩到，踩上去给门通电 → 触发进本）
-        // 门是朝北的自由门，玩家从南边走来，所以板子放在门南侧那一格
-        set(world, x + 1, y, z, Material.CHISELED_STONE_BRICKS);
-        Block plateBlock = world.getBlockAt(x, y, z + 1);
-        plateBlock.setType(Material.STONE_PRESSURE_PLATE, false);
-        if (plateBlock.getBlockData() instanceof Powerable plate) {
-            plate.setPowered(false);
-            plateBlock.setBlockData(plate, false);
-        }
-
-        // 门楣与告示牌
-        set(world, x, y + 2, z, Material.STONE_BRICKS);
-        set(world, x, y + 3, z, Material.OAK_SIGN);
-        Block signBlock = world.getBlockAt(x, y + 3, z);
-        if (signBlock.getState() instanceof Sign sign) {
-            sign.setLine(0, "§8副本入口");
-            sign.setLine(1, tier.display() + " §r难度");
-            sign.setLine(2, "§7踩下压力板进入");
-            sign.update(true, false);
-        }
-
-        // 两侧火把
-        set(world, x - 1, y, z, Material.TORCH);
-        set(world, x - 1, y - 1, z, Material.STONE_BRICKS);
-
+        Ruins.build(world, x, y, z, tier, random);
         entrances.register(world.getBlockAt(x, y, z).getLocation(), tierId);
         getLogger().info("生成副本入口 " + tierId + " @ " + world.getName()
                 + " " + x + "," + y + "," + z);
-    }
-
-    private void placeDoor(World world, int x, int y, int z) {
-        Block lower = world.getBlockAt(x, y, z);
-        lower.setType(Material.IRON_DOOR, false);
-        if (lower.getBlockData() instanceof Door data) {
-            data.setFacing(BlockFace.NORTH);
-            data.setHalf(Bisected.Half.BOTTOM);
-            lower.setBlockData(data, false);
-        }
-        Block upper = world.getBlockAt(x, y + 1, z);
-        upper.setType(Material.IRON_DOOR, false);
-        if (upper.getBlockData() instanceof Door data) {
-            data.setFacing(BlockFace.NORTH);
-            data.setHalf(Bisected.Half.TOP);
-            upper.setBlockData(data, false);
-        }
-    }
-
-    private void set(World world, int x, int y, int z, Material material) {
-        world.getBlockAt(x, y, z).setType(material, false);
     }
 
     // ------------------------------------------------------------ 红石触发
