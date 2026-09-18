@@ -1,0 +1,17 @@
+name: NWNDungeon
+version: 1.3.0
+main: nwndungeon.NWNDungeon
+api-version: '1.21'
+description: 随机副本入口与独立副本世界。门旁按钮通电即传送，房间清完才出下一间的按钮。
+author: 新世界网络
+commands:
+  dungeon:
+    description: 副本管理指令
+    usage: /dungeon <spawn|test|leave|list|tp|release|reload>
+permissions:
+  nwndungeon.admin:
+    description: 生成入口、重载配置、查看槽位
+    default: op
+  nwndungeon.use:
+    description: 使用副本入口
+    default: true

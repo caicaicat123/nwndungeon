@@ -1,0 +1,16 @@
+# 编译产物
+build/
+
+# 编译依赖（体积大且是第三方库，放 lib/ 里但不提交）
+lib/
+
+# 服务器上生成的真实配置 / 本地覆盖
+config.local.yml
+*.local.yml
+
+# 编辑器与系统
+.idea/
+.vscode/
+*.iml
+Thumbs.db
+.DS_Store

@@ -1,0 +1,146 @@
+# 新世界网络副本插件
+
+# 副本入口只在这些世界里生成
+worlds:
+  - world
+
+# 入口生成
+generation:
+  enabled: true
+  # 每生成一个新区块，有 1/chance 的概率长出入口
+  chance: 400
+  # 地表高度范围，超出就不生成（避免水下、雪山、虚空）
+  min-y: 60
+  max-y: 120
+  # 地表方块必须是这些之一
+  ground-blocks:
+    - GRASS_BLOCK
+    - SAND
+    - PODZOL
+    - COARSE_DIRT
+    - STONE
+    - ANDESITE
+    - DIORITE
+    - GRANITE
+  # 难度权重：铁 60%、金 30%、钻 10%
+  difficulty-weights:
+    iron: 60
+    gold: 30
+    diamond: 10
+
+# 触发规则
+trigger:
+  # 与门同区块内的玩家一起进副本（填半径数字则改用半径）
+  radius: -1
+  # 进本读条：秒数（0 = 老行为，按按钮直接传送）
+  cast-seconds: 3
+  # 读条期间离门多远算"走开了"，取消本次进入（格）
+  cancel-distance: 6
+  # 副本满了不让进
+  deny-when-full: true
+
+# 副本世界与槽位
+instance:
+  world: nwndungeon
+  # 槽位数量
+  slots: 8
+  # 槽位间距（格），越大越不容易互相看到
+  slot-spacing: 600
+  # 玩家离线多久后回收他的槽位（分钟）
+  empty-recycle-minutes: 5
+
+# 难度配置
+# rooms 里每一项 = 一个房间；每个房间可以配多波（waves），也可以直接写一条字符串（= 只有一波）
+# 每波格式 "类型:数量,类型:数量"；首领房的 boss.waves 是前面的小怪波，最后一波 = guards + 首领本人
+# 设计思路：近战顶前排、远程给压力、蜘蛛/苦力怕逼你走位
+tiers:
+  iron:
+    display: '§f普通'
+    block: IRON_BLOCK
+    time-limit-minutes: 20
+    rooms:
+      - waves:
+          - "ZOMBIE:3"
+          - "ZOMBIE:2"
+      - waves:
+          - "ZOMBIE:3,SKELETON:1"
+          - "ZOMBIE:2,SKELETON:2"
+      - waves:
+          - "ZOMBIE:2,SKELETON:1"
+          - "ZOMBIE:2,SKELETON:2,SPIDER:2"
+    boss:
+      type: ZOMBIE
+      name: '§c腐化首领'
+      health: 60
+      waves:
+        - "ZOMBIE:3"
+        - "SKELETON:2"
+      guards: "ZOMBIE:3,SKELETON:2"
+    supply-chest: [GOLDEN_APPLE, MILK_BUCKET, BREAD, COOKED_BEEF, IRON_INGOT, TORCH]
+    reward-chest: [DIAMOND, GOLD_BLOCK, ENCHANTED_BOOK, NETHERITE_SCRAP, ENCHANTED_GOLDEN_APPLE]
+  gold:
+    display: '§6困难'
+    block: GOLD_BLOCK
+    time-limit-minutes: 15
+    rooms:
+      - waves:
+          - "ZOMBIE:3"
+          - "ZOMBIE:2,SKELETON:2"
+      - waves:
+          - "HUSK:2,STRAY:2"
+          - "HUSK:2,STRAY:2"
+      - waves:
+          - "ZOMBIE:3,SKELETON:1"
+          - "CREEPER:3,SKELETON:2"
+      - waves:
+          - "SPIDER:4"
+          - "HUSK:3,STRAY:2"
+    boss:
+      type: HUSK
+      name: '§6金甲统领'
+      health: 90
+      waves:
+        - "HUSK:2"
+        - "STRAY:2"
+      guards: "HUSK:3,STRAY:3"
+    supply-chest: [GOLDEN_APPLE, MILK_BUCKET, COOKED_BEEF, GOLD_INGOT, ARROW, SHIELD]
+    reward-chest: [DIAMOND, NETHERITE_SCRAP, ENCHANTED_GOLDEN_APPLE, ENCHANTED_BOOK, DIAMOND_BLOCK]
+  diamond:
+    display: '§b噩梦'
+    block: DIAMOND_BLOCK
+    time-limit-minutes: 10
+    rooms:
+      - waves:
+          - "HUSK:3"
+          - "HUSK:2,STRAY:3"
+      - waves:
+          - "SKELETON:4"
+          - "WITHER_SKELETON:4"
+      - waves:
+          - "CREEPER:3,SPIDER:2"
+          - "WITHER_SKELETON:4"
+      - waves:
+          - "STRAY:4,HUSK:1"
+          - "CREEPER:3,HUSK:2"
+      - waves:
+          - "SPIDER:3"
+          - "WITHER_SKELETON:5"
+    boss:
+      type: WITHER_SKELETON
+      name: '§b深渊领主'
+      health: 140
+      waves:
+        - "WITHER_SKELETON:2"
+        - "CREEPER:2"
+      guards: "WITHER_SKELETON:4,CREEPER:2"
+    supply-chest: [ENCHANTED_GOLDEN_APPLE, MILK_BUCKET, GOLDEN_APPLE, DIAMOND, ARROW, SHIELD]
+    reward-chest: [NETHERITE_SCRAP, DIAMOND_BLOCK, ENCHANTED_GOLDEN_APPLE, ENCHANTED_BOOK, DIAMOND]
+
+# 副本内规则
+rules:
+  keep-inventory-on-death: true
+  allow-block-break: false
+  allow-block-place: false
+  disable-explosions: true
+  # 玩家进副本前的位置记下来，出来时送回门口
+  return-to-entrance: true
