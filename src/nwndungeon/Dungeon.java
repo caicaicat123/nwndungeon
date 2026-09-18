@@ -21,7 +21,7 @@ public final class Dungeon {
         public boolean cleared;           // 所有波都清完了
         public Location origin;           // 房间原点（rx, oy, oz）：运行时补刷波次用
         public Location doorLower;        // 通往下一间的铁门（最后一间为 null）
-        public Location buttonSpot;       // 清场后按钮出现的位置
+        public Location plateSpot;        // 清场后压力板出现的位置（门前地板上）
         public Location chestSpot;        // 补给箱位置
         public Location exitDoor;         // 最后一间的木门（离开用）
         public Location center;           // 房间中心（兜底检查怪物是否还在时用）

@@ -15,10 +15,9 @@ import org.bukkit.block.BlockState;
 import org.bukkit.boss.BarColor;
 import org.bukkit.boss.BarStyle;
 import org.bukkit.boss.BossBar;
-import org.bukkit.block.BlockFace;
 import org.bukkit.block.Chest;
+import org.bukkit.block.data.Powerable;
 import org.bukkit.block.data.type.Door;
-import org.bukkit.block.data.type.Switch;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
@@ -243,20 +242,18 @@ public final class Instances {
         if (room.chestSpot != null && tier != null) {
             fillChest(room.chestSpot, tier.supplyItems(), 3, false);
         }
-        if (room.buttonSpot != null) {
-            placeButton(room.buttonSpot);
+        if (room.plateSpot != null) {
+            placePlate(room.plateSpot);
         }
     }
 
-    /** 清场后出现的石按钮：按一下给铁门通电（约 1 秒），够一个人走过去。 */
-    private void placeButton(Location location) {
+    /** 清场后出现在门前的石压力板：踩上去就给铁门通电，人走过去自动开。 */
+    private void placePlate(Location location) {
         Block block = location.getBlock();
-        block.setType(Material.STONE_BUTTON, false);
-        if (block.getBlockData() instanceof Switch button) {
-            button.setFace(Switch.Face.FLOOR);
-            button.setFacing(BlockFace.NORTH);
-            button.setPowered(false);
-            block.setBlockData(button, false);
+        block.setType(Material.STONE_PRESSURE_PLATE, false);
+        if (block.getBlockData() instanceof Powerable plate) {
+            plate.setPowered(false);
+            block.setBlockData(plate, false);
         }
     }
 
@@ -279,10 +276,10 @@ public final class Instances {
                     door.setBlockData(data, false);
                 }
             }
-            if (room.buttonSpot != null) {
-                Material type = room.buttonSpot.getBlock().getType();
-                if (type == Material.LEVER || Tag.BUTTONS.isTagged(type)) {
-                    room.buttonSpot.getBlock().setType(Material.AIR, false);
+            if (room.plateSpot != null) {
+                Material type = room.plateSpot.getBlock().getType();
+                if (type == Material.LEVER || Tag.BUTTONS.isTagged(type) || Tag.PRESSURE_PLATES.isTagged(type)) {
+                    room.plateSpot.getBlock().setType(Material.AIR, false);
                 }
             }
         }
@@ -369,7 +366,7 @@ public final class Instances {
             if (player != null) {
                 player.sendMessage(room.bossRoom
                         ? "§5[副本]§r §a首领已被击败，中央木门可以离开了。"
-                        : "§5[副本]§r §a第 " + (room.index + 1) + " 间已清空，门旁出现按钮，角落出现补给箱。");
+                        : "§5[副本]§r §a第 " + (room.index + 1) + " 间已清空，门前出现压力板，角落出现补给箱。");
             }
         }
     }

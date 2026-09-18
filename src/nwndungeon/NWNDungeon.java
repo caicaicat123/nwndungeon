@@ -15,7 +15,7 @@ import org.bukkit.block.Block;
 import org.bukkit.block.BlockFace;
 import org.bukkit.block.Sign;
 import org.bukkit.block.data.Bisected;
-import org.bukkit.block.data.type.Switch;
+import org.bukkit.block.data.Powerable;
 import org.bukkit.block.data.type.Door;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
@@ -249,16 +249,14 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
         // 门底下的方块代表难度
         set(world, x, y - 1, z, tier.floorBlock());
 
-        // 按钮：凿制石砖台座 + 地面上（face=floor）的石按钮
-        // 注意必须显式设置附着面，否则默认是墙装按钮，旁边没有可附着的方块时会悬空
+        // 压力板：铺在门前的地板上（玩家走近门就会踩到，踩上去给门通电 → 触发进本）
+        // 门是朝北的自由门，玩家从南边走来，所以板子放在门南侧那一格
         set(world, x + 1, y, z, Material.CHISELED_STONE_BRICKS);
-        Block buttonBlock = world.getBlockAt(x + 1, y + 1, z);
-        buttonBlock.setType(Material.STONE_BUTTON, false);
-        if (buttonBlock.getBlockData() instanceof Switch button) {
-            button.setFace(Switch.Face.FLOOR);
-            button.setFacing(BlockFace.NORTH);
-            button.setPowered(false);
-            buttonBlock.setBlockData(button, false);
+        Block plateBlock = world.getBlockAt(x, y, z + 1);
+        plateBlock.setType(Material.STONE_PRESSURE_PLATE, false);
+        if (plateBlock.getBlockData() instanceof Powerable plate) {
+            plate.setPowered(false);
+            plateBlock.setBlockData(plate, false);
         }
 
         // 门楣与告示牌
@@ -268,7 +266,7 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
         if (signBlock.getState() instanceof Sign sign) {
             sign.setLine(0, "§8副本入口");
             sign.setLine(1, tier.display() + " §r难度");
-            sign.setLine(2, "§7按下按钮进入");
+            sign.setLine(2, "§7踩下压力板进入");
             sign.update(true, false);
         }
 

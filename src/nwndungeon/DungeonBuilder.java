@@ -150,7 +150,7 @@ public final class DungeonBuilder {
         }
     }
 
-    /** 走廊 + 尽头的铁门（关闭状态），并记录按钮该放的位置。 */
+    /** 走廊 + 尽头的铁门（关闭状态），并记录压力板该放的位置。 */
     private void buildCorridorAndDoor(World world, int rx, int oy, int oz, int cz, Dungeon.Room room) {
         int x1 = rx + ROOM;
         int x2 = rx + PITCH - 1;
@@ -182,9 +182,9 @@ public final class DungeonBuilder {
         // 门板会横卡在门框里，贴着门框边缘就能蹭过去——旧版"铁门像自动开着"就是这个原因。
         placeIronDoor(world, x2, oy + 1, cz, BlockFace.EAST);
         room.doorLower = new Location(world, x2, oy + 1, cz);
-        // 门旁那格换成凿制石砖做台座，清场后在它正上方放石按钮（按钮通电即可开门）
+        // 门旁那格换成凿制石砖当门柱（纯装饰）；清场后把压力板铺在门前的地板上（踩上去就给门通电）
         set(world, x2, oy + 1, cz + 1, Material.CHISELED_STONE_BRICKS);
-        room.buttonSpot = new Location(world, x2, oy + 2, cz + 1);
+        room.plateSpot = new Location(world, x2 - 1, oy + 1, cz);
     }
 
     // ---------------------------------------------------------------- 怪物（波次）
