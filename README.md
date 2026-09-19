@@ -33,6 +33,7 @@
 | `/dungeon test [iron\|gold\|diamond]` | `nwndungeon.admin` | 直接在副本世界生成一个测试本（不占玩家）；**打完所有房间后槽位自动释放** |
 | `/dungeon leave` | `nwndungeon.use` | 离开副本 |
 | `/dungeon list` | `nwndungeon.admin` | 查看槽位占用 |
+| `/dungeon locate [难度\|any]` | 所有人 | 找离你最近的自然生成副本入口（距离 / 方位 / 坐标） |
 | `/dungeon tp <槽位>` | `nwndungeon.admin` | 传送到指定槽位 |
 | `/dungeon release <槽位\|all>` | `nwndungeon.admin` | 手动回收槽位（里面的玩家会被送回入口） |
 | `/dungeon reload` | `nwndungeon.admin` | 重载配置 |

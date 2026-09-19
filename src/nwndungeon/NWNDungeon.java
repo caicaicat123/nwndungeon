@@ -74,6 +74,7 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
     private final Map<String, Integer> weights = new LinkedHashMap<>();
 
     private Entrances entrances;
+    private EntranceRegistry entranceRegistry;
     private Instances instances;
     private Stamina stamina;
     private LootTables lootTables;
@@ -110,6 +111,7 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
         panelConfig = PanelConfig.load(this);
         loadSettings();
         entrances = new Entrances(this);
+        entranceRegistry = new EntranceRegistry(this);
         instances = new Instances(this);
         stamina = new Stamina(this);
         if (EDITOR_ENABLED) {
@@ -298,6 +300,7 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
         }
         Location trigger = Ruins.build(world, x, y, z, tier, random);
         entrances.register(world.getBlockAt(x, y, z).getLocation(), tierId, trigger);
+        entranceRegistry.add(world.getName(), x, y, z, tierId);
         getLogger().info("生成副本入口 " + tierId + " @ " + world.getName()
                 + " " + x + "," + y + "," + z);
     }
@@ -328,6 +331,7 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
         if (door.getBlock().getType() != Material.IRON_DOOR) {
             // 门已经不在了（可能被绕过事件破坏），就地作废
             entrances.markBroken(door);
+            entranceRegistry.markBroken(door.getWorld().getName(), door.getBlockX(), door.getBlockY(), door.getBlockZ());
             return;
         }
         if (!instances.ready()) {
@@ -537,6 +541,7 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
                 door = door.clone().subtract(0, 1, 0);
             }
             if (entrances.markBroken(door)) {
+                entranceRegistry.markBroken(door.getWorld().getName(), door.getBlockX(), door.getBlockY(), door.getBlockZ());
                 player.sendMessage("§5[副本]§r §c入口已被破坏，此处永久失效。");
             }
         }
@@ -711,7 +716,7 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (args.length == 0) {
-            sender.sendMessage("§5[副本]§r /dungeon <spawn|test|leave|list|tp|release|stamina|edit|template|reload>");
+            sender.sendMessage("§5[副本]§r /dungeon <spawn|test|leave|list|locate|tp|release|stamina|edit|template|reload>");
             return true;
         }
         switch (args[0].toLowerCase(Locale.ROOT)) {
@@ -897,6 +902,55 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
                 player.sendMessage("§7每次进本消耗：普通 " + staminaCostFor("iron")
                         + " / 困难 " + staminaCostFor("gold") + " / 噩梦 " + staminaCostFor("diamond"));
             }
+            case "locate" -> {
+                if (!(sender instanceof Player player)) {
+                    sender.sendMessage("§c只能由玩家使用（要知道你站在哪）。");
+                    return true;
+                }
+                String filter = null;
+                if (args.length > 1) {
+                    String raw = args[1];
+                    if (raw.equalsIgnoreCase("any") || raw.equalsIgnoreCase("all") || raw.equals("全部")) {
+                        filter = null;
+                    } else {
+                        Tier match = tiers.values().stream()
+                                .filter(t -> t.id().equalsIgnoreCase(raw)
+                                        || stripColor(t.display()).equalsIgnoreCase(raw))
+                                .findFirst().orElse(null);
+                        if (match == null) {
+                            player.sendMessage("§c没有这个副本名。可用：" + tierNames() + "，或 any（不限难度）");
+                            return true;
+                        }
+                        filter = match.id();
+                    }
+                }
+                List<EntranceRegistry.Entry> found = entranceRegistry.nearest(player.getLocation(), filter, 3);
+                if (found.isEmpty()) {
+                    player.sendMessage("§5[副本]§r §7名单里暂时没有"
+                            + (filter == null ? "" : "这个难度的") + "入口。"
+                            + "§8（新入口会在探索新区块时自动登记）");
+                    return true;
+                }
+                player.sendMessage("§5[副本]§r §7离你最近的自然入口：");
+                int index = 1;
+                for (EntranceRegistry.Entry entry : found) {
+                    Location location = entry.toLocation();
+                    Tier tierOfEntry = tier(entry.tier);
+                    String name = tierOfEntry == null ? entry.tier : tierOfEntry.display();
+                    String where;
+                    if (location == null) {
+                        where = entry.world;
+                    } else if (!location.getWorld().equals(player.getWorld())) {
+                        where = entry.world + " §8(另一个世界)";
+                    } else {
+                        double dx = location.getX() - player.getLocation().getX();
+                        double dz = location.getZ() - player.getLocation().getZ();
+                        where = ((int) Math.sqrt(dx * dx + dz * dz)) + " 格 · " + EntranceRegistry.direction(dx, dz)
+                                + " · §f" + location.getBlockX() + ", " + location.getBlockY() + ", " + location.getBlockZ();
+                    }
+                    player.sendMessage("§7 " + index++ + ". §f" + name + " §7→ §f" + where);
+                }
+            }
             case "edit" -> {
                 if (!EDITOR_ENABLED) {
                     sender.sendMessage("§7副本编辑器还在开发中（1.5.0 分支），当前版本先关闭。");
@@ -940,7 +994,7 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
                 }
                 sendInto(slot, player, template.display);
             }
-            default -> sender.sendMessage("§c未知子命令。用法：/dungeon <spawn|test|leave|list|tp|release|edit|template|reload>");
+            default -> sender.sendMessage("§c未知子命令。用法：/dungeon <spawn|test|leave|list|locate|tp|release|edit|template|reload>");
         }
         return true;
     }
@@ -960,6 +1014,20 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
             return 0;
         }
         return tier.staminaCost();
+    }
+
+    /** 去掉 § 颜色代码（用来匹配玩家输入的难度名，比如输入"普通"）。 */
+    private static String stripColor(String text) {
+        return text == null ? "" : text.replaceAll("§.", "");
+    }
+
+    /** "普通、困难、噩梦" 这样的难度名列表。 */
+    private String tierNames() {
+        List<String> names = new ArrayList<>();
+        for (Tier tier : tiers.values()) {
+            names.add(stripColor(tier.display()));
+        }
+        return String.join("、", names);
     }
 
     // ------------------------------------------------------------ 编辑器命令
@@ -1171,7 +1239,7 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         if (args.length == 1) {
             String prefix = args[0].toLowerCase(Locale.ROOT);
-            return Arrays.asList("spawn", "test", "leave", "list", "tp", "release", "stamina", "edit", "template", "reload").stream()
+            return Arrays.asList("spawn", "test", "leave", "list", "locate", "tp", "release", "stamina", "edit", "template", "reload").stream()
                     .filter(s -> s.startsWith(prefix)).collect(Collectors.toList());
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("spawn")) {
