@@ -132,6 +132,7 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
         }, 40L, 20L);
 
         loadMobs();
+        registerPlaceholders();
         getLogger().info("副本插件已加载。入口生成=" + (generationEnabled ? "开" : "关")
                 + "，副本世界=" + instanceWorld);
     }
@@ -165,6 +166,20 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
     public void tagMob(LivingEntity entity, String templateId) {
         if (mobKey != null) {
             entity.getPersistentDataContainer().set(mobKey, PersistentDataType.STRING, templateId);
+        }
+    }
+
+    /** 服务器装了 PlaceholderAPI 就注册占位符（%nwndungeon_stamina% 等，给菜单/记分板用）。 */
+    private void registerPlaceholders() {
+        if (getServer().getPluginManager().getPlugin("PlaceholderAPI") == null) {
+            return;
+        }
+        try {
+            new StaminaPlaceholders(this).register();
+            getLogger().info("PlaceholderAPI 接口已注册：%nwndungeon_stamina% / _max / _next / _next_text / _bar / _full，"
+                    + "以及 cost_<难度> / money_<难度>");
+        } catch (Throwable t) {
+            getLogger().warning("PlaceholderAPI 接口注册失败：" + t);
         }
     }
 
@@ -939,7 +954,7 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
     }
 
     /** 某个难度进本要多少体力（0 = 不消耗）。 */
-    private int staminaCostFor(String tierId) {
+    public int staminaCostFor(String tierId) {
         Tier tier = tier(tierId);
         if (tier == null || stamina == null || !stamina.enabled()) {
             return 0;
@@ -1189,6 +1204,10 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
 
     public int recycleMinutes() {
         return recycleMinutes;
+    }
+
+    public Stamina stamina() {
+        return stamina;
     }
 
 }

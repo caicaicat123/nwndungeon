@@ -1,7 +1,8 @@
 name: NWNDungeon
-version: 1.4.8
+version: 1.4.9
 main: nwndungeon.NWNDungeon
 api-version: '1.21'
+softdepend: [PlaceholderAPI]
 description: 随机副本入口与独立副本世界。按难度生成遗迹入口；房间编号从第一间有怪的房间算起。
 author: 新世界网络
 commands:

@@ -1,5 +1,13 @@
 # 更新记录
 
+## 1.4.9
+
+- **PlaceholderAPI 接口**（装了 PAPI 才注册，`plugin.yml` 里 `softdepend`）：
+  `%nwndungeon_stamina%` 当前体力、`%nwndungeon_stamina_max%` 上限、`%nwndungeon_stamina_next%` 下一点秒数、
+  `%nwndungeon_stamina_next_text%` 好看版（已满 / 3 分 20 秒）、`%nwndungeon_stamina_bar%` 进度条、
+  `%nwndungeon_stamina_full%`；另有 `%nwndungeon_cost_<难度>%`（进本消耗）与 `%nwndungeon_money_<难度>%`（通关金币）
+- DeluxeMenus 主菜单「玩家信息」里加了三行体力（当前/上限 + 进度条、下一点回复、各难度进本消耗）
+
 ## 1.4.8
 
 - **掉落表拆成独立文件 `plugins/NWNDungeon/loot.yml`**：按难度分栏写补给箱 / 最终奖励箱

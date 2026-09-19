@@ -44,6 +44,21 @@
 | `nwndungeon.use` | `true`（所有人） | 用副本入口：按下门旁按钮时会被一起带进副本；`/dungeon leave` 也需要它 |
 | `nwndungeon.admin` | `op` | 管理指令：`/dungeon spawn`、`test`、`list`、`tp`、`reload` |
 
+## PlaceholderAPI 占位符
+
+装了 PlaceholderAPI 就自动注册（菜单 / 记分板 / 聊天都能用）：
+
+| 占位符 | 含义 |
+| --- | --- |
+| `%nwndungeon_stamina%` | 当前体力 |
+| `%nwndungeon_stamina_max%` | 体力上限 |
+| `%nwndungeon_stamina_next%` | 距离回下一点还有多少秒（已满 = 0） |
+| `%nwndungeon_stamina_next_text%` | 好看版：`已满` / `3 分 20 秒` |
+| `%nwndungeon_stamina_bar%` | 进度条（■ / □ 各 10 格） |
+| `%nwndungeon_stamina_full%` | 是否已满（true / false） |
+| `%nwndungeon_cost_iron%` / `_gold` / `_diamond` | 各难度进本消耗的体力 |
+| `%nwndungeon_money_iron%` / `_gold` / `_diamond` | 各难度通关发放的金币 |
+
 ## 开发者：自建副本模板（`/dungeon edit`）
 
 > 注意：这套编辑器属于 **1.5.0 分支**，当前 1.4.x 版本里默认关闭（`EDITOR_ENABLED = false`），命令只会提示「开发中」。
