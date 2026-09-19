@@ -27,6 +27,15 @@ if ($LASTEXITCODE -ne 0) { throw '编译失败' }
 
 Copy-Item (Join-Path $root 'plugin.yml') $classes -Force
 Copy-Item (Join-Path $root 'config.yml') $classes -Force
+if (Test-Path (Join-Path $root 'mobs.yml')) {
+    Copy-Item (Join-Path $root 'mobs.yml') $classes -Force
+}
+if (Test-Path (Join-Path $root 'loot.yml')) {
+    Copy-Item (Join-Path $root 'loot.yml') $classes -Force
+}
+if (Test-Path (Join-Path $root 'party.yml')) {
+    Copy-Item (Join-Path $root 'party.yml') $classes -Force
+}
 
 $jar = Join-Path $dist ("nwndungeon-$version.jar")
 & "$jdk\jar.exe" --create --file $jar -C $classes .

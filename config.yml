@@ -40,6 +40,12 @@ trigger:
   deny-when-full: true
 
 # 副本世界与槽位
+# 体力（每日次数）：默认 500 点池、24 小时回满（3456 tick / 点 = 172.8 秒 → 500 点正好 24h）
+stamina:
+  enabled: true
+  max: 500
+  regen-ticks: 3456
+
 instance:
   world: nwndungeon
   # 槽位数量
@@ -58,6 +64,10 @@ tiers:
     display: '§f普通'
     block: IRON_BLOCK
     time-limit-minutes: 20
+    # 通关奖励（走服务器经济 eco give <玩家> <数量>）
+    money-reward: 1000
+    # 进本消耗体力：500 点池 → 正好 20 次
+    stamina-cost: 25
     rooms:
       - waves:
           - "ZOMBIE:3"
@@ -76,12 +86,14 @@ tiers:
         - "ZOMBIE:3"
         - "SKELETON:2"
       guards: "ZOMBIE:3,SKELETON:2"
-    supply-chest: [GOLDEN_APPLE, MILK_BUCKET, BREAD, COOKED_BEEF, IRON_INGOT, TORCH]
-    reward-chest: [DIAMOND, GOLD_BLOCK, ENCHANTED_BOOK, NETHERITE_SCRAP, ENCHANTED_GOLDEN_APPLE]
+    # 掉落表在独立文件 plugins/NWNDungeon/loot.yml（按难度分栏，支持 weight/min/max/chance）
   gold:
     display: '§6困难'
     block: GOLD_BLOCK
     time-limit-minutes: 15
+    money-reward: 5000
+    # 500 点池 → 15 次（每次 33 点，15 次后还剩 5 点）
+    stamina-cost: 33
     rooms:
       - waves:
           - "ZOMBIE:3"
@@ -103,12 +115,14 @@ tiers:
         - "HUSK:2"
         - "STRAY:2"
       guards: "HUSK:3,STRAY:3"
-    supply-chest: [GOLDEN_APPLE, MILK_BUCKET, COOKED_BEEF, GOLD_INGOT, ARROW, SHIELD]
-    reward-chest: [DIAMOND, NETHERITE_SCRAP, ENCHANTED_GOLDEN_APPLE, ENCHANTED_BOOK, DIAMOND_BLOCK]
+    # 掉落表见 loot.yml
   diamond:
     display: '§b噩梦'
     block: DIAMOND_BLOCK
     time-limit-minutes: 10
+    money-reward: 20000
+    # 500 点池 → 正好 10 次
+    stamina-cost: 50
     rooms:
       - waves:
           - "HUSK:3"
@@ -133,8 +147,7 @@ tiers:
         - "WITHER_SKELETON:2"
         - "CREEPER:2"
       guards: "WITHER_SKELETON:4,CREEPER:2"
-    supply-chest: [ENCHANTED_GOLDEN_APPLE, MILK_BUCKET, GOLDEN_APPLE, DIAMOND, ARROW, SHIELD]
-    reward-chest: [NETHERITE_SCRAP, DIAMOND_BLOCK, ENCHANTED_GOLDEN_APPLE, ENCHANTED_BOOK, DIAMOND]
+    # 掉落表见 loot.yml
 
 # 副本内规则
 rules:

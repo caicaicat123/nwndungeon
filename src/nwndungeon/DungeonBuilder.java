@@ -9,6 +9,7 @@ import org.bukkit.block.Block;
 import org.bukkit.block.Sign;
 import org.bukkit.block.data.Bisected;
 import org.bukkit.block.data.type.Door;
+import org.bukkit.block.data.type.Lantern;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.EntityType;
 import org.bukkit.entity.LivingEntity;
@@ -34,7 +35,7 @@ import java.util.Random;
 public final class DungeonBuilder {
 
     public static final int ROOM = 25;
-    public static final int HEIGHT = 6;
+    public static final int HEIGHT = 10;   // 房间净高：抬高后大厅/战斗房更开阔（走廊仍是低拱）
     public static final int PITCH = 40;
 
     /** 每间房里 9 个刷怪点（相对房间原点的 x/z 偏移）。 */
@@ -65,6 +66,7 @@ public final class DungeonBuilder {
         for (int i = 1; i < total; i++) {
             Dungeon.Room room = dungeon.rooms.get(i);
             room.waves = parseWaves(specs.get(i));
+            room.displayIndex = i;          // 大厅(0) 没怪不编号，第 1 间有怪的房间就是"第 1 间"
             if (room.waves.isEmpty()) {
                 room.cleared = true;    // 没配阵容的房间直接当已清，别卡住流程
                 continue;
@@ -83,39 +85,61 @@ public final class DungeonBuilder {
         int x2 = rx + ROOM - 1;
         int z2 = oz + ROOM - 1;
         int cz = oz + ROOM / 2;
+        int wallTop = oy + HEIGHT - 1;
+        int ceil = oy + HEIGHT;
 
-        for (int x = rx; x <= x2; x++) {
-            for (int z = oz; z <= z2; z++) {
-                set(world, x, oy, z, brick());
-                set(world, x, oy + HEIGHT, z, brick());
+        // 地板：外圈包边 + 内圈走道 + 中央拼花
+        for (int dx = 0; dx < ROOM; dx++) {
+            for (int dz = 0; dz < ROOM; dz++) {
+                set(world, rx + dx, oy, oz + dz, floorMaterial(dx, dz));
             }
         }
-        for (int y = oy + 1; y < oy + HEIGHT; y++) {
-            for (int x = rx; x <= x2; x++) {
-                set(world, x, y, oz, brick());
-                set(world, x, y, z2, brick());
+        // 天花
+        for (int dx = 0; dx < ROOM; dx++) {
+            for (int dz = 0; dz < ROOM; dz++) {
+                set(world, rx + dx, ceil, oz + dz,
+                        random.nextInt(7) == 0 ? Material.MOSSY_STONE_BRICKS : Material.STONE_BRICKS);
             }
-            for (int z = oz; z <= z2; z++) {
-                set(world, rx, y, z, brick());
-                set(world, x2, y, z, brick());
+        }
+        // 四面墙：墙裙 + 石砖 + 顶部檐口
+        for (int y = oy + 1; y <= wallTop; y++) {
+            for (int dx = 0; dx < ROOM; dx++) {
+                set(world, rx + dx, y, oz, wallMaterial(y, oy, wallTop));
+                set(world, rx + dx, y, z2, wallMaterial(y, oy, wallTop));
+            }
+            for (int dz = 0; dz < ROOM; dz++) {
+                set(world, rx, y, oz + dz, wallMaterial(y, oy, wallTop));
+                set(world, x2, y, oz + dz, wallMaterial(y, oy, wallTop));
+            }
+        }
+        // 壁柱：向房间内凸一格（避开门洞与检查点所在的中间带）
+        for (int offset : new int[]{3, 8, 18, 23}) {
+            pilaster(world, rx + offset, oz + 1, oy, wallTop);
+            pilaster(world, rx + offset, z2 - 1, oy, wallTop);
+            pilaster(world, rx + 1, oz + offset, oy, wallTop);
+            pilaster(world, x2 - 1, oz + offset, oy, wallTop);
+        }
+        // 四盏吊灯（铁链 + 悬挂灯笼）
+        for (int[] spot : new int[][]{{6, 6}, {6, 18}, {18, 6}, {18, 18}}) {
+            hangingLantern(world, rx + spot[0], ceil, oz + spot[1]);
+        }
+        // 天花贴墙收口一圈半砖
+        for (int dx = 0; dx < ROOM; dx++) {
+            for (int dz = 0; dz < ROOM; dz++) {
+                int edge = Math.min(Math.min(dx, ROOM - 1 - dx), Math.min(dz, ROOM - 1 - dz));
+                if (edge == 1) {
+                    set(world, rx + dx, ceil - 1, oz + dz, Material.STONE_BRICK_SLAB);
+                }
             }
         }
 
         // 东墙开一道 1x2 的门洞（通往走廊），最后一间不留
         if (!last) {
-            set(world, x2, oy + 1, cz, Material.AIR);
-            set(world, x2, oy + 2, cz, Material.AIR);
+            carveDoorway(world, x2, x2 - 1, oy, cz, ceil);
         }
         // 西墙同样开洞，让走廊通进来；大厅不开
         if (!first) {
-            set(world, rx, oy + 1, cz, Material.AIR);
-            set(world, rx, oy + 2, cz, Material.AIR);
-        }
-
-        for (int x = rx + 5; x < x2; x += 8) {
-            for (int z = oz + 5; z < z2; z += 8) {
-                set(world, x, oy + HEIGHT - 1, z, Material.SEA_LANTERN);
-            }
+            carveDoorway(world, rx, rx + 1, oy, cz, ceil);
         }
 
         // 检查点：大厅 + 偶数房间。大厅那块铺在出生点正下方，其余铺在房间西侧（避开 9 个刷怪点）
@@ -127,12 +151,21 @@ public final class DungeonBuilder {
                     set(world, x, oy, z, Material.LODESTONE);
                 }
             }
+            for (int x = px - 2; x <= px + 2; x++) {
+                set(world, x, oy, pz - 2, Material.CHISELED_STONE_BRICKS);
+                set(world, x, oy, pz + 2, Material.CHISELED_STONE_BRICKS);
+            }
+            for (int z = pz - 2; z <= pz + 2; z++) {
+                set(world, px - 2, oy, z, Material.CHISELED_STONE_BRICKS);
+                set(world, px + 2, oy, z, Material.CHISELED_STONE_BRICKS);
+            }
+            hangingLantern(world, px, ceil, pz - 2);
             dungeon.checkpoints.add(new Location(world, px + 0.5, oy + 1, pz + 0.5));
-            set(world, px, oy + 1, pz - 2, Material.OAK_SIGN);
-            Block signBlock = world.getBlockAt(px, oy + 1, pz - 2);
+            set(world, px, oy + 1, pz - 3, Material.OAK_SIGN);
+            Block signBlock = world.getBlockAt(px, oy + 1, pz - 3);
             if (signBlock.getState() instanceof Sign sign) {
                 sign.setLine(0, "§b检查点 " + dungeon.checkpoints.size());
-                sign.setLine(1, "§7第 " + (index + 1) + " 间");
+                sign.setLine(1, index == 0 ? "§7入口大厅" : "§7第 " + index + " 间");
                 sign.setLine(2, "§7死亡后回到这里");
                 sign.update(true, false);
             }
@@ -157,19 +190,18 @@ public final class DungeonBuilder {
         int x2 = rx + PITCH - 1;
 
         for (int x = x1; x <= x2; x++) {
+            boolean rib = (x - x1) % 6 == 0;   // 每 6 格一道拱肋
             for (int z = cz - 1; z <= cz + 1; z++) {
-                set(world, x, oy, z, brick());
-                set(world, x, oy + 4, z, brick());
+                set(world, x, oy, z, rib ? Material.CHISELED_STONE_BRICKS
+                        : (z == cz ? Material.SMOOTH_STONE : brick()));
+                set(world, x, oy + 4, z, rib && z == cz ? Material.SEA_LANTERN : Material.STONE_BRICKS);
                 for (int y = oy + 1; y <= oy + 3; y++) {
                     set(world, x, y, z, Material.AIR);
                 }
                 for (int y = oy + 1; y <= oy + 3; y++) {
-                    set(world, x, y, cz - 2, brick());
-                    set(world, x, y, cz + 2, brick());
+                    set(world, x, y, cz - 2, rib ? Material.CHISELED_STONE_BRICKS : brick());
+                    set(world, x, y, cz + 2, rib ? Material.CHISELED_STONE_BRICKS : brick());
                 }
-            }
-            if (x % 8 == 0) {
-                set(world, x, oy + 3, cz, Material.SEA_LANTERN);
             }
         }
 
@@ -337,6 +369,72 @@ public final class DungeonBuilder {
             return Material.STONE_BRICKS;
         }
         return roll < 8 ? Material.CRACKED_STONE_BRICKS : Material.MOSSY_STONE_BRICKS;
+    }
+
+    /** 地板图案：最外圈包边、内圈浅色走道，其余拼花 + 两条 × 形石带。 */
+    private Material floorMaterial(int dx, int dz) {
+        int edge = Math.min(Math.min(dx, ROOM - 1 - dx), Math.min(dz, ROOM - 1 - dz));
+        if (edge == 0) {
+            return Material.CHISELED_STONE_BRICKS;
+        }
+        if (edge == 1) {
+            return Material.POLISHED_ANDESITE;
+        }
+        if (dx == dz || dx + dz == ROOM - 1) {
+            return Material.SMOOTH_STONE;
+        }
+        int roll = random.nextInt(10);
+        if (roll < 6) {
+            return Material.STONE_BRICKS;
+        }
+        return roll < 8 ? Material.CRACKED_STONE_BRICKS : Material.MOSSY_STONE_BRICKS;
+    }
+
+    /** 墙面：最下面一格墙裙、最上两格檐口，中间石砖混裂缝/苔藓。 */
+    private Material wallMaterial(int y, int oy, int wallTop) {
+        if (y == oy + 1) {
+            return Material.POLISHED_ANDESITE;
+        }
+        if (y >= wallTop - 1) {
+            return Material.CHISELED_STONE_BRICKS;
+        }
+        int roll = random.nextInt(10);
+        if (roll < 7) {
+            return Material.STONE_BRICKS;
+        }
+        return roll < 9 ? Material.CRACKED_STONE_BRICKS : Material.MOSSY_STONE_BRICKS;
+    }
+
+    /** 壁柱：从墙裙一直到檐口，顶端接到天花。 */
+    private void pilaster(World world, int x, int z, int oy, int wallTop) {
+        for (int y = oy + 1; y <= wallTop; y++) {
+            set(world, x, y, z, Material.CHISELED_STONE_BRICKS);
+        }
+        set(world, x, wallTop + 1, z, Material.CHISELED_STONE_BRICKS);
+    }
+
+    /** 墙上开 1×2 门洞，包一圈凿制石砖门框，并在门内侧的天花上挂一盏灯。 */
+    private void carveDoorway(World world, int wallX, int insideX, int oy, int cz, int ceil) {
+        set(world, wallX, oy + 1, cz, Material.AIR);
+        set(world, wallX, oy + 2, cz, Material.AIR);
+        set(world, wallX, oy + 3, cz, Material.CHISELED_STONE_BRICKS);
+        set(world, wallX, oy + 1, cz - 1, Material.CHISELED_STONE_BRICKS);
+        set(world, wallX, oy + 2, cz - 1, Material.CHISELED_STONE_BRICKS);
+        set(world, wallX, oy + 1, cz + 1, Material.CHISELED_STONE_BRICKS);
+        set(world, wallX, oy + 2, cz + 1, Material.CHISELED_STONE_BRICKS);
+        hangingLantern(world, insideX, ceil, cz);
+    }
+
+    /** 吊灯：天花下两格铁链 + 一格悬挂灯笼。 */
+    private void hangingLantern(World world, int x, int ceil, int z) {
+        set(world, x, ceil - 1, z, Material.CHAIN);
+        set(world, x, ceil - 2, z, Material.CHAIN);
+        Block lamp = world.getBlockAt(x, ceil - 3, z);
+        lamp.setType(Material.LANTERN, false);
+        if (lamp.getBlockData() instanceof Lantern lantern) {
+            lantern.setHanging(true);
+            lamp.setBlockData(lantern, false);
+        }
     }
 
     private void set(World world, int x, int y, int z, Material material) {

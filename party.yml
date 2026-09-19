@@ -1,0 +1,18 @@
+# 进本确认面板：入口区块里"不止一个人"时，按按钮先弹这个面板 —— 改完 /dungeon reload 生效
+#
+# 只在多人时弹；单人按按钮还是直接读条
+confirm-panel: true
+
+# 面板标题（箱子界面最上面的字）
+title: '&8确认进入副本'
+
+# 面板里的文字；支持 & 颜色代码，%count% = 人数、%tier% = 难度名
+header: '&b本次一起进本：&f%count% 人'
+hint: '&7难度：%tier%'
+hint2: '&7只有点「确认进入」才会开始 3 秒读条'
+confirm: '&a确认进入'
+confirm-lore:
+  - '&7带上面这些人开始读条'
+cancel: '&c取消'
+cancel-lore:
+  - '&7先不进本'

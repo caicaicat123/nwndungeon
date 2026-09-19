@@ -44,6 +44,32 @@
 | `nwndungeon.use` | `true`（所有人） | 用副本入口：按下门旁按钮时会被一起带进副本；`/dungeon leave` 也需要它 |
 | `nwndungeon.admin` | `op` | 管理指令：`/dungeon spawn`、`test`、`list`、`tp`、`reload` |
 
+## 开发者：自建副本模板（`/dungeon edit`）
+
+> 注意：这套编辑器属于 **1.5.0 分支**，当前 1.4.x 版本里默认关闭（`EDITOR_ENABLED = false`），命令只会提示「开发中」。
+
+不用改代码，直接在游戏里搭副本：
+
+```
+/dungeon edit new <名字>       # 进编辑世界（nwndungeon_edit）的专属空地，创造模式；同名会把旧结构贴回来继续改
+/dungeon edit pos1 / pos2      # 站到两个对角，框住整份副本
+/dungeon edit spawn            # 进本落点（脚下）
+/dungeon edit checkpoint       # 检查点（可以多个）
+/dungeon edit room <n>         # 切到第 n 间（之后的刷怪点算这一间）
+/dungeon edit wave <n>         # 切到第 n 波（清完一波隔 3 秒刷下一波）
+/dungeon edit mob <模板名>      # 之后放的刷怪点用哪个怪物（mobs.yml 里的；clear = 默认僵尸）
+/dungeon edit spawnpoint       # 在脚下加一个刷怪点
+/dungeon edit gate             # 看着一扇铁门，登记成"这一间清完就开的那扇门"
+/dungeon edit chest            # 看着箱子，登记成这一间的奖励箱位置
+/dungeon edit exit             # 通关后出现的离开压力板（踩上去出本）
+/dungeon edit info             # 看已经记了什么
+/dungeon edit save             # 保存成模板（templates/<名字>.nbt + .yml）
+/dungeon edit test <名字>       # 立刻贴一份自己进去跑
+```
+
+自定义怪物写 `plugins/NWNDungeon/mobs.yml`（种类 / 名字 / 血量 / 攻击力 / 移速 / 装备 + 附魔 / 掉不掉装备 / 额外掉落），
+刷怪点用 `mob: <模板名>` 引用；**不需要 MythicMobs**。模板副本和现有的随机副本并存，互不影响。
+
 LuckPerms 用法：
 
 ```

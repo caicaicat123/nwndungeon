@@ -4,6 +4,7 @@ import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
+import org.bukkit.NamespacedKey;
 import org.bukkit.Sound;
 import org.bukkit.Tag;
 import org.bukkit.World;
@@ -19,12 +20,14 @@ import org.bukkit.block.Chest;
 import org.bukkit.block.data.Powerable;
 import org.bukkit.block.data.type.Door;
 import org.bukkit.entity.Entity;
+import org.bukkit.entity.EntityType;
 import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.GameRule;
 
 import java.util.ArrayList;
@@ -53,9 +56,13 @@ public final class Instances {
         public Location spawn;
         public long deadline;
         public long startedAt;
+        public int limitMinutes = 20;
         public int kills;
         public final Map<UUID, Integer> deaths = new HashMap<>();
         public List<ItemStack> lastReward = new ArrayList<>();
+        public final Map<UUID, Long> offlineSince = new HashMap<>();
+        public Location lastPasteMin;
+        public Location lastPasteMax;
         public boolean busy;
         public boolean manualHold;
         public Dungeon dungeon;
@@ -67,10 +74,16 @@ public final class Instances {
         }
     }
 
+    /** 离线太久被摘出副本的玩家：留一张"回家票"，上线时送回进本前的位置与游戏模式。 */
+    public record ReturnTicket(Location location, GameMode mode) {
+    }
+
+    private final Map<UUID, ReturnTicket> pendingReturns = new HashMap<>();
     private final NWNDungeon plugin;
     private final Random random = new Random();
     private final Map<Integer, Slot> slots = new LinkedHashMap<>();
     private World world;
+    private NamespacedKey prevModeKey;
 
     public Instances(NWNDungeon plugin) {
         this.plugin = plugin;
@@ -78,6 +91,41 @@ public final class Instances {
 
     public World world() {
         return world;
+    }
+
+    // ---------------------------------------------------------------- 进本前的游戏模式
+
+    private NamespacedKey prevModeKey() {
+        if (prevModeKey == null) {
+            prevModeKey = new NamespacedKey(plugin, "prev_gamemode");
+        }
+        return prevModeKey;
+    }
+
+    /** 记住进本前的游戏模式（写进玩家数据里，服务器重启也不会丢）。已经记过就不覆盖。 */
+    public void rememberMode(Player player, GameMode mode) {
+        if (mode == null || mode == GameMode.ADVENTURE) {
+            return;   // 别把"冒险模式"当成进本前的模式记下来
+        }
+        if (player.getPersistentDataContainer().has(prevModeKey(), PersistentDataType.STRING)) {
+            return;
+        }
+        player.getPersistentDataContainer().set(prevModeKey(), PersistentDataType.STRING, mode.name());
+    }
+
+    /** 还原进本前的游戏模式并清掉记录；没有记录返回 false。 */
+    public boolean restoreMode(Player player) {
+        String raw = player.getPersistentDataContainer().get(prevModeKey(), PersistentDataType.STRING);
+        if (raw == null) {
+            return false;
+        }
+        player.getPersistentDataContainer().remove(prevModeKey());
+        try {
+            player.setGameMode(GameMode.valueOf(raw));
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     public boolean ready() {
@@ -160,14 +208,18 @@ public final class Instances {
             slot.deaths.clear();
             slot.kills = 0;
             slot.lastReward = new ArrayList<>();
+            clearRegion(slot.lastPasteMin, slot.lastPasteMax);
             clear(slot);
+            slot.lastPasteMin = null;
+            slot.lastPasteMax = null;
 
             Dungeon dungeon = new DungeonBuilder().build(
                     world, slot.origin.getBlockX(), slot.origin.getBlockY(), slot.origin.getBlockZ(), tier);
             slot.dungeon = dungeon;
             slot.spawn = dungeon.spawn;
             slot.startedAt = System.currentTimeMillis();
-            slot.deadline = slot.startedAt + tier.timeLimitMinutes() * 60_000L;
+            slot.limitMinutes = tier.timeLimitMinutes();
+            slot.deadline = slot.startedAt + slot.limitMinutes * 60_000L;
 
             for (Dungeon.Room room : dungeon.rooms) {
                 room.initialMobs = room.mobs.size();
@@ -223,10 +275,44 @@ public final class Instances {
         }
     }
 
+    /** 只清一小块（用于把上一份模板副本留下的方块抹干净）。两个参数为 null 时什么都不做。 */
+    private void clearRegion(Location min, Location max) {
+        if (min == null || max == null || !ready()) {
+            return;
+        }
+        for (int x = min.getBlockX(); x <= max.getBlockX(); x++) {
+            for (int z = min.getBlockZ(); z <= max.getBlockZ(); z++) {
+                for (int y = min.getBlockY(); y <= max.getBlockY(); y++) {
+                    Block block = world.getBlockAt(x, y, z);
+                    if (block.getType() != Material.AIR) {
+                        block.setType(Material.AIR, false);
+                    }
+                }
+            }
+        }
+        Location center = new Location(world,
+                (min.getBlockX() + max.getBlockX()) / 2.0,
+                (min.getBlockY() + max.getBlockY()) / 2.0,
+                (min.getBlockZ() + max.getBlockZ()) / 2.0);
+        for (Entity entity : world.getNearbyEntities(center,
+                Math.abs(max.getBlockX() - min.getBlockX()) / 2.0 + 2,
+                Math.abs(max.getBlockY() - min.getBlockY()) / 2.0 + 2,
+                Math.abs(max.getBlockZ() - min.getBlockZ()) / 2.0 + 2)) {
+            if (!(entity instanceof Player)) {
+                entity.remove();
+            }
+        }
+    }
+
     /** 房间清场：补给箱 + 按钮；首领房则给最终奖励箱和离开用的木门。 */
     public void grantRewards(Slot slot, Dungeon.Room room) {
         Tier tier = plugin.tier(slot.tier);
         if (room.bossRoom) {
+            if (room.exitPlate != null) {
+                // 模板副本：通关后出现离开压力板（踩上去就出去）
+                placePlate(room.exitPlate);
+                return;
+            }
             if (room.chestSpot != null && tier != null) {
                 // 抽好的奖励留一份，通关结算界面里展示
                 Map<Integer, ItemStack> loot = rollLoot(tier.rewardItems(), 7, true);
@@ -292,7 +378,7 @@ public final class Instances {
      * 拿到的快照背包是个空壳，填完再 update() 写回去等于把空背包覆盖回去 ——
      * 箱子就是空的。所以先放箱子，下一 tick 再用实时状态直接改世界里的容器。
      */
-    private void fillChest(Location location, List<Material> pool, int maxTypes, boolean rich) {
+    private void fillChest(Location location, List<LootEntry> pool, int maxTypes, boolean rich) {
         if (pool.isEmpty()) {
             return;
         }
@@ -305,20 +391,55 @@ public final class Instances {
         Bukkit.getScheduler().runTask(plugin, () -> writeChest(location, loot));
     }
 
-    /** 抽奖励：随机格子 + 随机数量（单箱 27 格）。 */
-    private Map<Integer, ItemStack> rollLoot(List<Material> pool, int maxTypes, boolean rich) {
+    /**
+     * 抽奖励：随机格子 + 按权重抽物品 + 每件物品自己的数量区间（单箱 27 格）。
+     * 先按 chance 筛出本次候选（chance=1 的一直在池里），再按 weight 加权抽取。
+     */
+    private Map<Integer, ItemStack> rollLoot(List<LootEntry> pool, int maxTypes, boolean rich) {
         int types = rich ? maxTypes : 1 + random.nextInt(Math.min(3, maxTypes));
         Map<Integer, ItemStack> loot = new LinkedHashMap<>();
+        if (pool.isEmpty()) {
+            return loot;
+        }
+        List<LootEntry> candidates = new ArrayList<>();
+        for (LootEntry entry : pool) {
+            if (entry.chance() >= 1.0 || random.nextDouble() < entry.chance()) {
+                candidates.add(entry);
+            }
+        }
+        if (candidates.isEmpty()) {
+            candidates = pool;
+        }
+        int totalWeight = 0;
+        for (LootEntry entry : candidates) {
+            totalWeight += entry.weight();
+        }
         while (loot.size() < types && loot.size() < 27) {
             int slot = random.nextInt(27);
             if (loot.containsKey(slot)) {
                 continue;
             }
-            Material material = pool.get(random.nextInt(pool.size()));
-            int amount = rich ? 1 + random.nextInt(4) : 1 + random.nextInt(2);
-            loot.put(slot, new ItemStack(material, amount));
+            LootEntry picked = pick(candidates, totalWeight);
+            int min = picked.min() > 0 ? picked.min() : 1;
+            int max = picked.max() > 0 ? picked.max() : (rich ? 4 : 2);
+            if (max < min) {
+                max = min;
+            }
+            int amount = min + random.nextInt(max - min + 1);
+            loot.put(slot, new ItemStack(picked.material(), Math.max(1, amount)));
         }
         return loot;
+    }
+
+    private LootEntry pick(List<LootEntry> candidates, int totalWeight) {
+        int roll = random.nextInt(Math.max(1, totalWeight));
+        for (LootEntry entry : candidates) {
+            roll -= entry.weight();
+            if (roll < 0) {
+                return entry;
+            }
+        }
+        return candidates.get(candidates.size() - 1);
     }
 
     /** 下一 tick 执行：先按实时容器写，写不进再退回快照写法，两条路都读回来确认。 */
@@ -366,7 +487,7 @@ public final class Instances {
             if (player != null) {
                 player.sendMessage(room.bossRoom
                         ? "§5[副本]§r §a首领已被击败，中央木门可以离开了。"
-                        : "§5[副本]§r §a第 " + (room.index + 1) + " 间已清空，门前出现压力板，角落出现补给箱。");
+                        : "§5[副本]§r §a第 " + room.displayIndex + " 间已清空，门前出现压力板，角落出现补给箱。");
             }
         }
     }
@@ -388,7 +509,7 @@ public final class Instances {
                 if (!slot.busy || slot.dungeon != dungeon || room.cleared) {
                     return;   // 槽位已经回收或重开了，别再刷
                 }
-                DungeonBuilder.spawnWave(world, room, next, plugin.tier(slot.tier));
+                spawnWave(slot, room, next);
                 announceWave(slot, room, next, false);
                 refreshBar(slot);
             }, WAVE_DELAY_TICKS);
@@ -411,10 +532,10 @@ public final class Instances {
                 continue;
             }
             if (incoming) {
-                player.sendTitle("§e下一波 3 秒后", "§7第 " + (room.index + 1) + " 间 · " + wave, 5, 40, 10);
+                player.sendTitle("§e下一波 3 秒后", "§7第 " + room.displayIndex + " 间 · " + wave, 5, 40, 10);
                 player.playSound(player.getLocation(), Sound.BLOCK_BEACON_ACTIVATE, 0.7f, 1.4f);
             } else {
-                player.sendTitle("§c" + wave, "§7第 " + (room.index + 1) + " 间", 5, 30, 10);
+                player.sendTitle("§c" + wave, "§7第 " + room.displayIndex + " 间", 5, 30, 10);
                 player.playSound(player.getLocation(), Sound.ENTITY_ENDERMAN_TELEPORT, 0.8f, 0.8f);
             }
         }
@@ -432,6 +553,17 @@ public final class Instances {
             String rank = rank(slot, elapsed, deaths);
             player.sendMessage("§5[副本]§r §a通关！用时 §f" + formatDuration(elapsed)
                     + "§a，击杀 §f" + slot.kills + "§a，评级 §e" + rank + "§a。");
+            Tier tier = plugin.tier(slot.tier);
+            if (tier != null && tier.moneyReward() > 0) {
+                boolean paid = Bukkit.dispatchCommand(Bukkit.getConsoleSender(),
+                        "eco give " + player.getName() + " " + tier.moneyReward());
+                if (paid) {
+                    player.sendMessage("§5[副本]§r §a通关奖励 §f" + tier.moneyReward() + " §a金币已到账。");
+                } else {
+                    plugin.getLogger().warning("发钱失败（服务器没有 eco 指令？）："
+                            + player.getName() + " × " + tier.moneyReward());
+                }
+            }
             player.playSound(player.getLocation(), Sound.UI_TOAST_CHALLENGE_COMPLETE, 1f, 1f);
             player.openInventory(summaryInventory(slot, player, elapsed, deaths, rank));
         }
@@ -439,8 +571,7 @@ public final class Instances {
 
     /** 评级：用时（相对限时）+ 死亡次数。S = 半场以内且零死亡；A = 3/4 限时以内且最多死一次；其余 B。 */
     private String rank(Slot slot, long elapsed, int deaths) {
-        Tier tier = plugin.tier(slot.tier);
-        long limit = (tier == null ? 20 : tier.timeLimitMinutes()) * 60_000L;
+        long limit = Math.max(1, slot.limitMinutes) * 60_000L;
         double ratio = limit <= 0 ? 1 : elapsed / (double) limit;
         if (ratio <= 0.5 && deaths == 0) {
             return "S";
@@ -458,7 +589,7 @@ public final class Instances {
 
     private Inventory summaryInventory(Slot slot, Player player, long elapsed, int deaths, String rank) {
         Tier tier = plugin.tier(slot.tier);
-        int limit = tier == null ? 20 : tier.timeLimitMinutes();
+        int limit = Math.max(1, slot.limitMinutes);
         SummaryHolder holder = new SummaryHolder();
         Inventory inventory = Bukkit.createInventory(holder, 27, "§5副本结算 · 评级 " + rank);
         holder.inventory = inventory;
@@ -485,6 +616,10 @@ public final class Instances {
         }
         inventory.setItem(16, named(new ItemStack(Material.CHEST), "§6最终奖励",
                 lore.toArray(new String[0])));
+        if (tier != null && tier.moneyReward() > 0) {
+            inventory.setItem(22, named(new ItemStack(Material.GOLD_INGOT), "§6金币奖励",
+                    "§f+" + tier.moneyReward()));
+        }
         return inventory;
     }
 
@@ -537,6 +672,199 @@ public final class Instances {
             }
         }
         return false;
+    }
+
+    // ---------------------------------------------------------------- 模板副本
+
+    private java.io.File templatesFolder() {
+        return new java.io.File(plugin.getDataFolder(), "templates");
+    }
+
+    /** 刷一波怪：程序生成的副本用固定 9 个点位，模板副本用编辑时标记的刷怪点。 */
+    private void spawnWave(Slot slot, Dungeon.Room room, int waveIndex) {
+        if (room.plan.isEmpty()) {
+            DungeonBuilder.spawnWave(world, room, waveIndex, plugin.tier(slot.tier));
+            return;
+        }
+        if (waveIndex < 0 || waveIndex >= room.plan.size()) {
+            return;
+        }
+        room.waveIndex = waveIndex;
+        room.wavePending = false;
+        room.mobs.clear();
+        for (Dungeon.TemplateSpawn spawn : room.plan.get(waveIndex)) {
+            MobTemplate mobTemplate = spawn.mob() == null ? null : plugin.mobTemplate(spawn.mob());
+            Entity entity = world.spawnEntity(spawn.point(),
+                    mobTemplate != null ? mobTemplate.type() : EntityType.ZOMBIE);
+            if (entity == null) {
+                continue;
+            }
+            entity.setPersistent(true);
+            if (mobTemplate != null && entity instanceof LivingEntity living) {
+                mobTemplate.apply(living);
+                plugin.tagMob(living, mobTemplate.id());
+            }
+            room.mobs.add(entity.getUniqueId());
+        }
+        room.initialMobs = room.mobs.size();
+    }
+
+    /** 用模板开一个副本实例（模板副本，和程序生成的随机副本并存）。 */
+    public Slot allocateTemplate(Template template, List<Player> party) {
+        if (!ready() || template == null) {
+            return null;
+        }
+        for (Slot slot : slots.values()) {
+            if (slot.busy) {
+                continue;
+            }
+            slot.busy = true;
+            slot.manualHold = false;
+            slot.tier = "template:" + template.name;
+            slot.entranceOf.clear();
+            slot.checkpointOf.clear();
+            slot.modeOf.clear();
+            slot.deaths.clear();
+            slot.kills = 0;
+            slot.lastReward = new ArrayList<>();
+            if (slot.lastPasteMin != null && slot.lastPasteMax != null) {
+                clearRegion(slot.lastPasteMin, slot.lastPasteMax);
+            } else {
+                clear(slot);
+            }
+            slot.lastPasteMin = null;
+            slot.lastPasteMax = null;
+            try {
+                org.bukkit.util.BlockVector size = template.paste(templatesFolder(), slot.origin);
+                slot.lastPasteMin = slot.origin.clone();
+                slot.lastPasteMax = slot.origin.clone()
+                        .add(size.getBlockX() - 1, size.getBlockY() - 1, size.getBlockZ() - 1);
+            } catch (Exception e) {
+                plugin.getLogger().warning("贴模板 " + template.name + " 失败：" + e.getMessage());
+            }
+            Dungeon dungeon = templateDungeon(template, slot.origin);
+            slot.dungeon = dungeon;
+            slot.spawn = dungeon.spawn;
+            slot.startedAt = System.currentTimeMillis();
+            slot.limitMinutes = Math.max(1, template.timeLimitMinutes);
+            slot.deadline = slot.startedAt + slot.limitMinutes * 60_000L;
+            if (slot.bar != null) {
+                slot.bar.removeAll();
+            }
+            BossBar bar = Bukkit.createBossBar("§5副本", BarColor.PURPLE, BarStyle.SEGMENTED_20);
+            slot.bar = bar;
+            for (Player player : party) {
+                slot.entranceOf.put(player.getUniqueId(), player.getLocation());
+                slot.checkpointOf.put(player.getUniqueId(), dungeon.spawn);
+                slot.modeOf.put(player.getUniqueId(), player.getGameMode());
+                bar.addPlayer(player);
+            }
+            // 每间只刷第一波；没有配怪的房间直接算清场（压力板会立刻补上）
+            for (Dungeon.Room room : dungeon.rooms) {
+                if (room.index == 0) {
+                    continue;
+                }
+                if (room.plan.isEmpty()) {
+                    room.cleared = true;
+                    grantRewards(slot, room);
+                    continue;
+                }
+                spawnWave(slot, room, 0);
+                room.initialMobs = room.mobs.size();
+            }
+            refreshBar(slot);
+            return slot;
+        }
+        return null;
+    }
+
+    /** 模板数据 → 运行时结构（坐标从模板原点换算到槽位原点）。 */
+    private Dungeon templateDungeon(Template template, Location origin) {
+        Dungeon dungeon = new Dungeon();
+        dungeon.spawn = template.at(world, origin, template.spawn);
+
+        Dungeon.Room hall = new Dungeon.Room(0);
+        hall.cleared = true;
+        hall.origin = origin.clone();
+        hall.center = dungeon.spawn;
+        dungeon.rooms.add(hall);
+
+        int index = 1;
+        for (Template.Room def : template.rooms) {
+            Dungeon.Room room = new Dungeon.Room(index);
+            room.origin = origin.clone();
+            room.bossRoom = def.boss;
+            if (def.door != null) {
+                room.doorLower = template.at(world, origin, def.door);
+            }
+            if (def.plate != null) {
+                room.plateSpot = template.at(world, origin, def.plate);
+            }
+            if (def.chest != null) {
+                room.chestSpot = template.at(world, origin, def.chest);
+            }
+            for (List<Template.Spawn> wave : def.waves) {
+                List<Dungeon.TemplateSpawn> points = new ArrayList<>();
+                for (Template.Spawn spawn : wave) {
+                    points.add(new Dungeon.TemplateSpawn(template.at(world, origin, spawn.point()), spawn.mob()));
+                }
+                room.plan.add(points);
+            }
+            if (!room.plan.isEmpty() && !room.plan.get(0).isEmpty()) {
+                room.center = room.plan.get(0).get(0).point();
+            } else if (room.chestSpot != null) {
+                room.center = room.chestSpot;
+            } else {
+                room.center = origin.clone();
+            }
+            if (def.boss && template.exitPlate != null) {
+                room.exitPlate = template.at(world, origin, template.exitPlate);
+            }
+            dungeon.rooms.add(room);
+            index++;
+        }
+        for (Template.Point point : template.checkpoints) {
+            dungeon.checkpoints.add(template.at(world, origin, point));
+        }
+        int number = 0;
+        for (Dungeon.Room room : dungeon.rooms) {
+            if (!room.plan.isEmpty()) {
+                room.displayIndex = ++number;
+            }
+        }
+        return dungeon;
+    }
+
+    /** 模板副本：站到通关后出现的压力板上就离开副本。 */
+    private void checkExitPlate(Slot slot) {
+        if (slot.dungeon == null) {
+            return;
+        }
+        Dungeon.Room last = null;
+        for (Dungeon.Room room : slot.dungeon.rooms) {
+            if (room.exitPlate != null) {
+                last = room;
+            }
+        }
+        if (last == null || !last.cleared) {
+            return;
+        }
+        Location plate = last.exitPlate;
+        if (!world.isChunkLoaded(plate.getBlockX() >> 4, plate.getBlockZ() >> 4)) {
+            return;
+        }
+        if (!Tag.PRESSURE_PLATES.isTagged(plate.getBlock().getType())) {
+            return;
+        }
+        for (UUID uuid : new ArrayList<>(slot.entranceOf.keySet())) {
+            Player player = Bukkit.getPlayer(uuid);
+            if (player == null || !player.getWorld().equals(plate.getWorld())) {
+                continue;
+            }
+            if (player.getLocation().distanceSquared(plate) <= 1.5 * 1.5) {
+                leave(player, "你踩上压力板，从副本里走了出来。");
+            }
+        }
     }
 
     /**
@@ -633,12 +961,12 @@ public final class Instances {
                 : "";
         if (target.wavePending) {
             slot.bar.setColor(BarColor.YELLOW);
-            slot.bar.setTitle("§e第 " + (target.index + 1) + " 间" + wave + " §7· §f下一波准备中");
+            slot.bar.setTitle("§e第 " + target.displayIndex + " 间" + wave + " §7· §f下一波准备中");
             slot.bar.setProgress(1.0);
             return;
         }
         slot.bar.setColor(BarColor.PURPLE);
-        slot.bar.setTitle("§e第 " + (target.index + 1) + " 间" + wave + " §7· §f剩余 " + target.mobs.size() + " 只");
+        slot.bar.setTitle("§e第 " + target.displayIndex + " 间" + wave + " §7· §f剩余 " + target.mobs.size() + " 只");
         slot.bar.setProgress(target.initialMobs <= 0 ? 1 : (double) target.mobs.size() / target.initialMobs);
     }
 
@@ -658,7 +986,14 @@ public final class Instances {
                 if (previous != null) {
                     player.setGameMode(previous);
                 }
+                restoreMode(player);
                 player.sendMessage("§5[副本]§r " + reason);
+            } else {
+                // 人不在线：留张回家票，等他上线时送回进本前的位置
+                Location back = slot.entranceOf.get(uuid);
+                if (back != null) {
+                    pendingReturns.put(uuid, new ReturnTicket(back, slot.modeOf.get(uuid)));
+                }
             }
         }
         if (slot.bar != null) {
@@ -668,8 +1003,61 @@ public final class Instances {
         slot.entranceOf.clear();
         slot.checkpointOf.clear();
         slot.modeOf.clear();
+        slot.offlineSince.clear();
         slot.dungeon = null;
         slot.busy = false;
+    }
+
+    /**
+     * 玩家重新上线时调用：如果他还在这场副本里，就地接续（送回最近的检查点、恢复冒险模式、重新挂上 Boss 血条）；
+     * 如果这一局已经结束/回收了，就按"回家票"送回进本前的位置。
+     */
+    public void resume(Player player) {
+        if (!ready()) {
+            return;
+        }
+        Slot slot = byPlayer(player.getUniqueId());
+        if (slot != null) {
+            slot.offlineSince.remove(player.getUniqueId());
+            if (slot.bar != null) {
+                slot.bar.addPlayer(player);
+            }
+            Location target = slot.checkpointOf.get(player.getUniqueId());
+            if (target == null) {
+                target = slot.spawn;
+            }
+            if (target != null) {
+                player.teleport(target);
+            }
+            player.setGameMode(GameMode.ADVENTURE);
+            player.sendMessage("§5[副本]§r §a欢迎回来，已把你接回副本（死亡会回到最近的检查点）。");
+            player.sendMessage("§7输入 §f/dungeon leave §7可以离开副本。");
+            return;
+        }
+        ReturnTicket ticket = pendingReturns.remove(player.getUniqueId());
+        if (ticket != null) {
+            if (ticket.location() != null && ticket.location().getWorld() != null) {
+                player.teleport(ticket.location());
+            }
+            if (ticket.mode() != null) {
+                player.setGameMode(ticket.mode());
+            }
+            restoreMode(player);
+            player.sendMessage("§5[副本]§r §7你离线太久，这一局已经结束，已把你送回原来的位置。");
+            return;
+        }
+        if (isInstanceWorld(player.getWorld())) {
+            player.teleport(Bukkit.getWorlds().get(0).getSpawnLocation());
+            if (!restoreMode(player)) {
+                player.setGameMode(GameMode.SURVIVAL);
+            }
+            player.sendMessage("§5[副本]§r §7你已经不在副本里了，已把你送回主城。");
+            return;
+        }
+        // 兜底：身上还留着"进本前的游戏模式"记录，但人已经在副本外 → 还原
+        if (restoreMode(player)) {
+            player.sendMessage("§5[副本]§r §7已把你从副本的冒险模式切回原来的游戏模式。");
+        }
     }
 
     public void leave(Player player, String reason) {
@@ -690,6 +1078,7 @@ public final class Instances {
         if (previous != null) {
             player.setGameMode(previous);
         }
+        restoreMode(player);
         player.sendMessage("§5[副本]§r " + reason);
         if (slot.entranceOf.isEmpty()) {
             release(slot, "副本已清空，槽位回收。");
@@ -712,14 +1101,25 @@ public final class Instances {
             for (UUID uuid : new ArrayList<>(slot.entranceOf.keySet())) {
                 Player player = Bukkit.getPlayer(uuid);
                 if (player == null || !player.isOnline()) {
+                    // 掉线先留着位置（配置 instance.empty-recycle-minutes，默认 5 分钟），到期才摘出去
+                    long since = slot.offlineSince.computeIfAbsent(uuid, key -> now);
+                    if (now - since <= plugin.recycleMinutes() * 60_000L) {
+                        continue;
+                    }
+                    Location back = slot.entranceOf.get(uuid);
+                    if (back != null) {
+                        pendingReturns.put(uuid, new ReturnTicket(back, slot.modeOf.get(uuid)));
+                    }
                     if (slot.bar != null && player != null) {
                         slot.bar.removePlayer(player);
                     }
                     slot.entranceOf.remove(uuid);
                     slot.checkpointOf.remove(uuid);
                     slot.modeOf.remove(uuid);
+                    slot.offlineSince.remove(uuid);
                     continue;
                 }
+                slot.offlineSince.remove(uuid);
                 if (!isInstanceWorld(player.getWorld()) || slot.dungeon == null) {
                     continue;
                 }
@@ -737,6 +1137,7 @@ public final class Instances {
             }
             pruneVanishedMobs(slot);
             enforceGates(slot);
+            checkExitPlate(slot);
             refreshBar(slot);
             if (slot.entranceOf.isEmpty()) {
                 if (slot.manualHold && completed(slot)) {

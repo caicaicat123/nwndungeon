@@ -24,9 +24,10 @@ import java.util.Map;
 public record Tier(String id, String display, Material floorBlock, int timeLimitMinutes,
                    List<List<String>> rooms, String bossType, String bossName, int bossHealth,
                    List<String> bossWaves, String bossGuards,
-                   List<Material> supplyItems, List<Material> rewardItems) {
+                   List<LootEntry> supplyItems, List<LootEntry> rewardItems,
+                   int moneyReward, int staminaCost) {
 
-    public static Tier from(String id, ConfigurationSection section) {
+    public static Tier from(String id, ConfigurationSection section, LootTables loot) {
         Material block = Material.matchMaterial(String.valueOf(section.getString("block", "IRON_BLOCK")));
         return new Tier(id,
                 section.getString("display", id),
@@ -38,8 +39,10 @@ public record Tier(String id, String display, Material floorBlock, int timeLimit
                 Math.max(20, section.getInt("boss.health", 60)),
                 toStrings(section.getList("boss.waves")),
                 section.getString("boss.guards", ""),
-                materials(section.getStringList("supply-chest")),
-                materials(section.getStringList("reward-chest")));
+                loot != null && loot.has(id) ? loot.supply(id) : LootTables.parse(section.getList("supply-chest")),
+                loot != null && loot.has(id) ? loot.reward(id) : LootTables.parse(section.getList("reward-chest")),
+                Math.max(0, section.getInt("money-reward", 0)),
+                Math.max(0, section.getInt("stamina-cost", 0)));
     }
 
     /** 首领房的波次（每项 = 一波的阵容字符串）：前面几波小怪 + 最后一波（随首领一起登场）。 */
@@ -90,14 +93,4 @@ public record Tier(String id, String display, Material floorBlock, int timeLimit
         return out;
     }
 
-    private static List<Material> materials(List<String> raw) {
-        List<Material> out = new ArrayList<>();
-        for (String name : raw) {
-            Material material = Material.matchMaterial(name);
-            if (material != null) {
-                out.add(material);
-            }
-        }
-        return out.isEmpty() ? List.of(Material.BREAD) : out;
-    }
 }

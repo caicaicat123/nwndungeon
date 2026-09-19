@@ -5,6 +5,7 @@ import org.bukkit.Chunk;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
+import org.bukkit.NamespacedKey;
 import org.bukkit.Particle;
 import org.bukkit.Sound;
 import org.bukkit.World;
@@ -20,6 +21,9 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabCompleter;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.entity.Player;
+import org.bukkit.entity.LivingEntity;
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
@@ -32,7 +36,9 @@ import org.bukkit.event.entity.EntityDeathEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.block.Action;
 import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryCloseEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.event.world.ChunkLoadEvent;
@@ -60,6 +66,8 @@ import java.util.stream.Collectors;
 public final class NWNDungeon extends JavaPlugin implements Listener, CommandExecutor, TabCompleter {
 
     private final Random random = new Random();
+    /** 1.5.0 的副本编辑器先关着（用户 2026-09-19：1.5.0 先放放，1.4.x 照改）。 */
+    private static final boolean EDITOR_ENABLED = false;
     private final Map<String, Tier> tiers = new LinkedHashMap<>();
     private final Set<String> genWorlds = new HashSet<>();
     private final Set<Material> groundBlocks = new HashSet<>();
@@ -67,6 +75,11 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
 
     private Entrances entrances;
     private Instances instances;
+    private Stamina stamina;
+    private LootTables lootTables;
+    private PanelConfig panelConfig;
+    private final Map<Location, UUID> buttonPresser = new HashMap<>();
+    private final java.util.Set<Location> openPanels = new java.util.HashSet<>();
 
     private boolean generationEnabled;
     private int genChance;
@@ -86,13 +99,23 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
     private int castSeconds;
     private double cancelDistance;
     private final Map<Location, Cast> casts = new HashMap<>();
+    private final Map<String, MobTemplate> mobTemplates = new LinkedHashMap<>();
+    private TemplateEditor editor;
+    private NamespacedKey mobKey;
 
     @Override
     public void onEnable() {
         saveDefaultConfig();
+        lootTables = LootTables.load(this);
+        panelConfig = PanelConfig.load(this);
         loadSettings();
         entrances = new Entrances(this);
         instances = new Instances(this);
+        stamina = new Stamina(this);
+        if (EDITOR_ENABLED) {
+            editor = new TemplateEditor(this);
+        }
+        mobKey = new NamespacedKey(this, "mob_template");
 
         getServer().getPluginManager().registerEvents(this, this);
         if (getCommand("dungeon") != null) {
@@ -108,6 +131,7 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
             }
         }, 40L, 20L);
 
+        loadMobs();
         getLogger().info("副本插件已加载。入口生成=" + (generationEnabled ? "开" : "关")
                 + "，副本世界=" + instanceWorld);
     }
@@ -118,6 +142,30 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
             cast.bar.removeAll();
         }
         casts.clear();
+    }
+
+    // ------------------------------------------------------------ 怪物模板
+
+    private void loadMobs() {
+        mobTemplates.clear();
+        mobTemplates.putAll(MobTemplate.loadAll(this));
+        getLogger().info("怪物模板 " + mobTemplates.size() + " 个："
+                + (mobTemplates.isEmpty() ? "（无）" : String.join(", ", mobTemplates.keySet())));
+    }
+
+    public MobTemplate mobTemplate(String id) {
+        return id == null ? null : mobTemplates.get(id.toLowerCase(Locale.ROOT));
+    }
+
+    public TemplateEditor editor() {
+        return editor;
+    }
+
+    /** 给刷出来的怪打上"用的哪个怪物模板"标签，死亡时按模板发额外掉落。 */
+    public void tagMob(LivingEntity entity, String templateId) {
+        if (mobKey != null) {
+            entity.getPersistentDataContainer().set(mobKey, PersistentDataType.STRING, templateId);
+        }
     }
 
     private void loadSettings() {
@@ -159,7 +207,8 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
         ConfigurationSection tierSection = cfg.getConfigurationSection("tiers");
         if (tierSection != null) {
             for (String key : tierSection.getKeys(false)) {
-                tiers.put(key.toLowerCase(Locale.ROOT), Tier.from(key.toLowerCase(Locale.ROOT), tierSection.getConfigurationSection(key)));
+                tiers.put(key.toLowerCase(Locale.ROOT), Tier.from(key.toLowerCase(Locale.ROOT),
+                        tierSection.getConfigurationSection(key), lootTables));
             }
         }
         for (Tier loaded : tiers.values()) {
@@ -173,6 +222,9 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
         allowPlace = cfg.getBoolean("rules.allow-block-place", false);
         disableExplosions = cfg.getBoolean("rules.disable-explosions", true);
         returnToEntrance = cfg.getBoolean("rules.return-to-entrance", true);
+        if (stamina != null) {
+            stamina.reload();
+        }
     }
 
     // ------------------------------------------------------------ 入口生成
@@ -229,8 +281,8 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
         if (tier == null) {
             return;
         }
-        Ruins.build(world, x, y, z, tier, random);
-        entrances.register(world.getBlockAt(x, y, z).getLocation(), tierId);
+        Location trigger = Ruins.build(world, x, y, z, tier, random);
+        entrances.register(world.getBlockAt(x, y, z).getLocation(), tierId, trigger);
         getLogger().info("生成副本入口 " + tierId + " @ " + world.getName()
                 + " " + x + "," + y + "," + z);
     }
@@ -269,21 +321,61 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
         if (casts.containsKey(door)) {
             return;   // 这扇门已经在读条了
         }
-        List<Player> party = partyAt(door);
-        if (party.isEmpty()) {
+        List<Player> members = partyAt(door);
+        if (members.isEmpty()) {
+            return;
+        }
+        // 区块里不止一个人：先弹确认面板（谁按下按钮谁确认），确认后才开始读条
+        UUID presserId = buttonPresser.remove(door);
+        Player presser = presserId == null ? null : Bukkit.getPlayer(presserId);
+        if (panelConfig != null && panelConfig.enabled && members.size() > 1 && presser != null
+                && !openPanels.contains(door) && !casts.containsKey(door)) {
+            openPanels.add(door);
+            Tier tier = tier(entry.tier());
+            EntryPanel.open(presser, door, tier == null ? entry.tier() : tier.display(), members, panelConfig);
+            return;
+        }
+        startEntry(entry, door, members, members.size() > 1);
+    }
+
+    /**
+     * 真正开始一次进本：查槽位 → 查体力 → 读条（或直接传送）。
+     * lenient = 允许队员站得离门比较远（多人在区块里确认进本时用，不然读条会被"走远"判定取消）。
+     */
+    private void startEntry(Entrances.Entry entry, Location door, List<Player> members, boolean lenient) {
+        if (door != null && casts.containsKey(door)) {
+            return;
+        }
+        if (members.isEmpty()) {
             return;
         }
         if (!instances.hasFreeSlot()) {
             if (denyWhenFull) {
-                party.forEach(p -> p.sendMessage("§5[副本]§r §c副本已满，稍后再来。"));
+                members.forEach(p -> p.sendMessage("§5[副本]§r §c副本已满，稍后再来。"));
             }
             return;
         }
+        // 体力检查：谁不够就不给进（够的话读条结束后统一扣）
+        int cost = staminaCostFor(entry.tier());
+        if (cost > 0) {
+            List<String> poor = new ArrayList<>();
+            for (Player player : members) {
+                if (stamina.current(player) < cost) {
+                    poor.add(player.getName() + "(" + stamina.current(player) + ")");
+                }
+            }
+            if (!poor.isEmpty()) {
+                members.forEach(p -> p.sendMessage("§5[副本]§r §c体力不足，本次需要 " + cost + " 点："
+                        + String.join("、", poor)));
+                members.forEach(p -> p.sendMessage("§7你的体力：" + stamina.describe(p)));
+                return;
+            }
+        }
         if (castSeconds <= 0) {
-            enter(entry, party);   // 配成 0 秒 = 老行为：直接传送
+            enter(entry, members);   // 配成 0 秒 = 老行为：直接传送
             return;
         }
-        startCast(door, entry, party);
+        startCast(door, entry, members, lenient);
     }
 
     // ------------------------------------------------------------ 读条进本
@@ -294,18 +386,20 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
         final String tierId;
         final List<UUID> party = new ArrayList<>();
         final BossBar bar;
+        final boolean lenient;   // 多人在区块里确认进本：不因为离门远而掉队
         int ticks;
         int taskId = -1;
 
-        Cast(Location door, String tierId) {
+        Cast(Location door, String tierId, boolean lenient) {
             this.door = door;
             this.tierId = tierId;
+            this.lenient = lenient;
             this.bar = Bukkit.createBossBar("§5进入副本", BarColor.PURPLE, BarStyle.SOLID);
         }
     }
 
-    private void startCast(Location door, Entrances.Entry entry, List<Player> party) {
-        Cast cast = new Cast(door, entry.tier());
+    private void startCast(Location door, Entrances.Entry entry, List<Player> party, boolean lenient) {
+        Cast cast = new Cast(door, entry.tier(), lenient);
         for (Player player : party) {
             cast.party.add(player.getUniqueId());
             cast.bar.addPlayer(player);
@@ -323,7 +417,8 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
             Player player = Bukkit.getPlayer(uuid);
             boolean gone = player == null || !player.isOnline() || player.isDead()
                     || !player.getWorld().equals(cast.door.getWorld())
-                    || player.getLocation().distanceSquared(cast.door) > cancelDistance * cancelDistance;
+                    || (!cast.lenient
+                        && player.getLocation().distanceSquared(cast.door) > cancelDistance * cancelDistance);
             if (gone) {
                 if (player != null) {
                     cast.bar.removePlayer(player);
@@ -379,15 +474,16 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
             }
             return;
         }
+        int cost = staminaCostFor(entry.tier());
+        if (cost > 0) {
+            for (Player player : party) {
+                if (!stamina.spend(player, cost)) {
+                    player.sendMessage("§5[副本]§r §c体力不足，本次没扣（需要 " + cost + " 点）。");
+                }
+            }
+        }
         for (Player player : party) {
-            slot.modeOf.put(player.getUniqueId(), player.getGameMode());
-            player.setGameMode(GameMode.ADVENTURE);
-            player.teleport(slot.spawn);
-            player.playSound(player.getLocation(), Sound.ENTITY_ENDERMAN_TELEPORT, 1f, 1f);
-            player.sendMessage("§5[副本]§r 进入 " + (tier == null ? entry.tier() : tier.display())
-                    + " §r副本，限时 " + (tier == null ? 20 : tier.timeLimitMinutes()) + " 分钟。");
-            player.sendMessage("§7脚下的磁石平台就是第一个检查点；死亡会回到最近的检查点，物品不会掉落。");
-            player.sendMessage("§7随时可以用 §f/dungeon leave §7离开副本。");
+            sendInto(slot, player, tier == null ? entry.tier() : tier.display());
         }
     }
 
@@ -449,11 +545,25 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
         }
     }
 
-    /** 房间里的怪物被击杀：推进房间进度、刷新血条、必要时发放补给与按钮。 */
+    /** 房间里的怪物被击杀：先按怪物模板发额外掉落，再推进房间进度。 */
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onEntityDeath(EntityDeathEvent event) {
+        LivingEntity entity = event.getEntity();
+        if (mobKey != null && entity.getPersistentDataContainer().has(mobKey, PersistentDataType.STRING)) {
+            MobTemplate template = mobTemplate(entity.getPersistentDataContainer()
+                    .get(mobKey, PersistentDataType.STRING));
+            if (template != null) {
+                for (MobTemplate.DropSpec drop : template.drops()) {
+                    if (random.nextDouble() > drop.chance()) {
+                        continue;
+                    }
+                    int amount = drop.min() + random.nextInt(Math.max(1, drop.max() - drop.min() + 1));
+                    event.getDrops().add(new ItemStack(drop.material(), Math.max(1, amount)));
+                }
+            }
+        }
         if (instances.ready()) {
-            instances.onMobDeath(event.getEntity());
+            instances.onMobDeath(entity);
         }
     }
 
@@ -464,7 +574,18 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
             return;
         }
         Block block = event.getClickedBlock();
-        if (block == null || block.getType() != Material.OAK_DOOR) {
+        if (block == null) {
+            return;
+        }
+        // 副本入口按钮：记下是谁按的；红石事件进来时才知道该给谁弹"确认队伍"面板
+        if (block.getType() == Material.STONE_BUTTON && !instances.isInstanceWorld(block.getWorld())) {
+            Entrances.Entry entry = entrances.byTrigger(block.getLocation());
+            if (entry != null && entry.alive() && entry.door() != null) {
+                buttonPresser.put(entry.door(), event.getPlayer().getUniqueId());
+            }
+            return;
+        }
+        if (block.getType() != Material.OAK_DOOR) {
             return;
         }
         if (!instances.isInstanceWorld(block.getWorld())) {
@@ -485,6 +606,35 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
     public void onInventoryClick(InventoryClickEvent event) {
         if (event.getInventory().getHolder() instanceof Instances.SummaryHolder) {
             event.setCancelled(true);
+            return;
+        }
+        if (event.getInventory().getHolder() instanceof EntryPanel.Holder holder) {
+            event.setCancelled(true);
+            if (!(event.getWhoClicked() instanceof Player player)) {
+                return;
+            }
+            int slot = event.getRawSlot();
+            if (slot == EntryPanel.CANCEL_SLOT) {
+                openPanels.remove(holder.door());
+                player.closeInventory();
+                return;
+            }
+            if (slot == EntryPanel.CONFIRM_SLOT) {
+                openPanels.remove(holder.door());
+                player.closeInventory();
+                Entrances.Entry entry = entrances.get(holder.door());
+                if (entry != null && entry.alive()) {
+                    startEntry(entry, holder.door(), partyAt(holder.door()), true);
+                }
+            }
+        }
+    }
+
+    /** 关掉确认面板 = 取消（没点确认就不进本）。 */
+    @EventHandler
+    public void onInventoryClose(InventoryCloseEvent event) {
+        if (event.getInventory().getHolder() instanceof EntryPanel.Holder holder) {
+            openPanels.remove(holder.door());
         }
     }
 
@@ -531,12 +681,22 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
         }
     }
 
+    /** 玩家重新上线：还在副本里就接续，否则（离线太久/副本已结束）送回进本前的位置，避免卡在副本世界。 */
+    @EventHandler
+    public void onJoin(PlayerJoinEvent event) {
+        Player player = event.getPlayer();
+        if (!instances.ready()) {
+            return;
+        }
+        Bukkit.getScheduler().runTaskLater(this, () -> instances.resume(player), 1L);
+    }
+
     // ------------------------------------------------------------ 指令
 
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (args.length == 0) {
-            sender.sendMessage("§5[副本]§r /dungeon <spawn|test|leave|list|tp|release|reload>");
+            sender.sendMessage("§5[副本]§r /dungeon <spawn|test|leave|list|tp|release|stamina|edit|template|reload>");
             return true;
         }
         switch (args[0].toLowerCase(Locale.ROOT)) {
@@ -550,7 +710,9 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
                     return true;
                 }
                 if (instances.byPlayer(player.getUniqueId()) == null) {
-                    player.sendMessage("§7你不在副本里。");
+                    player.sendMessage(instances.restoreMode(player)
+                            ? "§7你不在副本里，已把你切回原来的游戏模式。"
+                            : "§7你不在副本里。");
                     return true;
                 }
                 instances.leave(player, "你离开了副本。");
@@ -705,10 +867,65 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
                 if (!requireAdmin(sender)) {
                     return true;
                 }
+                lootTables = LootTables.load(this);
+                panelConfig = PanelConfig.load(this);
                 loadSettings();
+                loadMobs();
                 sender.sendMessage("§a配置已重载。");
             }
-            default -> sender.sendMessage("§c未知子命令。用法：/dungeon <spawn|test|leave|list|tp|release|reload>");
+            case "stamina" -> {
+                if (!(sender instanceof Player player)) {
+                    sender.sendMessage("§c只能由玩家使用。");
+                    return true;
+                }
+                player.sendMessage("§5[副本]§r 你的体力：" + stamina.describe(player));
+                player.sendMessage("§7每次进本消耗：普通 " + staminaCostFor("iron")
+                        + " / 困难 " + staminaCostFor("gold") + " / 噩梦 " + staminaCostFor("diamond"));
+            }
+            case "edit" -> {
+                if (!EDITOR_ENABLED) {
+                    sender.sendMessage("§7副本编辑器还在开发中（1.5.0 分支），当前版本先关闭。");
+                    return true;
+                }
+                if (!requireAdmin(sender)) {
+                    return true;
+                }
+                if (!(sender instanceof Player player)) {
+                    sender.sendMessage("§c只能由玩家使用。");
+                    return true;
+                }
+                handleEdit(player, args);
+            }
+            case "template" -> {
+                if (!EDITOR_ENABLED) {
+                    sender.sendMessage("§7模板副本还在开发中（1.5.0 分支），当前版本先关闭。");
+                    return true;
+                }
+                if (!(sender instanceof Player player)) {
+                    sender.sendMessage("§c只能由玩家使用。");
+                    return true;
+                }
+                if (args.length < 2) {
+                    player.sendMessage("§c用法：/dungeon template <模板名>");
+                    return true;
+                }
+                Template template = editor.template(args[1]);
+                if (template == null) {
+                    player.sendMessage("§c没有这个模板。现有：" + namesOrNone());
+                    return true;
+                }
+                if (instances.byPlayer(player.getUniqueId()) != null) {
+                    player.sendMessage("§c你已经在副本里了。");
+                    return true;
+                }
+                Instances.Slot slot = instances.allocateTemplate(template, List.of(player));
+                if (slot == null) {
+                    player.sendMessage("§c没有空闲槽位。");
+                    return true;
+                }
+                sendInto(slot, player, template.display);
+            }
+            default -> sender.sendMessage("§c未知子命令。用法：/dungeon <spawn|test|leave|list|tp|release|edit|template|reload>");
         }
         return true;
     }
@@ -721,11 +938,225 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
         return true;
     }
 
+    /** 某个难度进本要多少体力（0 = 不消耗）。 */
+    private int staminaCostFor(String tierId) {
+        Tier tier = tier(tierId);
+        if (tier == null || stamina == null || !stamina.enabled()) {
+            return 0;
+        }
+        return tier.staminaCost();
+    }
+
+    // ------------------------------------------------------------ 编辑器命令
+
+    private void handleEdit(Player player, String[] args) {
+        if (args.length < 2) {
+            player.sendMessage("§5[编辑器]§r /dungeon edit <new|save|cancel|pos1|pos2|spawn|checkpoint|chest|exit|room|wave|mob|spawnpoint|gate|info|test|list|delete>");
+            return;
+        }
+        String action = args[1].toLowerCase(Locale.ROOT);
+        if (action.equals("list")) {
+            player.sendMessage("§7模板：" + namesOrNone());
+            return;
+        }
+        if (action.equals("new")) {
+            if (args.length < 3) {
+                player.sendMessage("§c用法：/dungeon edit new <模板名>（同名会把已保存的结构贴回来继续改）");
+                return;
+            }
+            editor.open(player, args[2]);
+            return;
+        }
+        if (action.equals("delete")) {
+            if (args.length < 3) {
+                player.sendMessage("§c用法：/dungeon edit delete <模板名>");
+                return;
+            }
+            player.sendMessage(editor.delete(args[2]) ? "§a已删除模板 " + args[2] : "§c没有这个模板。");
+            return;
+        }
+        if (action.equals("test")) {
+            if (args.length < 3) {
+                player.sendMessage("§c用法：/dungeon edit test <模板名>");
+                return;
+            }
+            Template template = editor.template(args[2]);
+            if (template == null) {
+                player.sendMessage("§c没有这个模板。现有：" + namesOrNone());
+                return;
+            }
+            Instances.Slot slot = instances.allocateTemplate(template, List.of(player));
+            if (slot == null) {
+                player.sendMessage("§c没有空闲槽位。");
+                return;
+            }
+            sendInto(slot, player, template.display);
+            player.sendMessage("§7测试本在槽位 #" + slot.index + "，打完最后一间自动释放。");
+            return;
+        }
+        if (action.equals("reload")) {
+            loadMobs();
+            player.sendMessage("§a怪物模板已重载：" + mobTemplates.size() + " 个。");
+            return;
+        }
+        TemplateEditor.Session session = editor.session(player);
+        if (session == null) {
+            player.sendMessage("§c你不在编辑器里。先 §f/dungeon edit new <模板名>§c（同名可继续编辑）。");
+            return;
+        }
+        switch (action) {
+            case "cancel" -> editor.close(player, session);
+            case "save" -> editor.save(player, session);
+            case "pos1" -> {
+                session.pos1 = player.getLocation().getBlock().getLocation();
+                player.sendMessage("§a角 1 = " + fmt(session.pos1));
+            }
+            case "pos2" -> {
+                session.pos2 = player.getLocation().getBlock().getLocation();
+                player.sendMessage("§a角 2 = " + fmt(session.pos2));
+            }
+            case "spawn" -> {
+                session.spawn = feet(player);
+                player.sendMessage("§a进本落点 = " + fmt(session.spawn));
+            }
+            case "checkpoint" -> {
+                session.checkpoints.add(feet(player));
+                player.sendMessage("§a检查点 +1（共 " + session.checkpoints.size() + " 个）");
+            }
+            case "exit" -> {
+                session.exitPlate = player.getLocation().getBlock().getLocation();
+                player.sendMessage("§a通关离开压力板 = " + fmt(session.exitPlate) + "（首领房清完会出现在这里）");
+            }
+            case "chest" -> {
+                Block target = targetBlock(player);
+                if (target == null) {
+                    player.sendMessage("§c看着要放补给/奖励箱的方块再执行。");
+                    return;
+                }
+                session.currentRoom().chest = target.getLocation();
+                player.sendMessage("§a第 " + session.room + " 间的奖励箱 = " + fmt(target.getLocation()));
+            }
+            case "gate" -> {
+                Block target = targetBlock(player);
+                if (target == null || target.getType() != Material.IRON_DOOR) {
+                    player.sendMessage("§c看着一扇铁门执行（会自动取下半格）。");
+                    return;
+                }
+                Location door = target.getLocation();
+                if (target.getBlockData() instanceof Door data && data.getHalf() == Bisected.Half.TOP) {
+                    door = door.clone().subtract(0, 1, 0);
+                }
+                session.currentRoom().door = door;
+                player.sendMessage("§a第 " + session.room + " 间的门登记完成（这一间清完会开门）。");
+            }
+            case "spawnpoint" -> {
+                List<TemplateEditor.Mark> wave = session.currentRoom().waves
+                        .computeIfAbsent(session.wave, key -> new ArrayList<>());
+                wave.add(new TemplateEditor.Mark(feet(player), session.mob));
+                player.sendMessage("§a第 " + session.room + " 间 / 第 " + session.wave + " 波 +1（怪："
+                        + (session.mob == null ? "默认僵尸" : session.mob) + "）");
+            }
+            case "room" -> {
+                if (args.length < 3) {
+                    player.sendMessage("§c用法：/dungeon edit room <房间号>");
+                    return;
+                }
+                session.room = Math.max(1, parseInt(args[2], session.room));
+                player.sendMessage("§a当前房间 = 第 " + session.room + " 间");
+            }
+            case "wave" -> {
+                if (args.length < 3) {
+                    player.sendMessage("§c用法：/dungeon edit wave <波次>");
+                    return;
+                }
+                session.wave = Math.max(1, parseInt(args[2], session.wave));
+                player.sendMessage("§a当前波次 = 第 " + session.wave + " 波");
+            }
+            case "mob" -> {
+                if (args.length < 3) {
+                    player.sendMessage("§c用法：/dungeon edit mob <怪物模板|clear>。现有：" + mobNamesOrNone());
+                    return;
+                }
+                if (args[2].equalsIgnoreCase("clear")) {
+                    session.mob = null;
+                    player.sendMessage("§a当前怪物 = 默认僵尸");
+                } else if (mobTemplate(args[2]) == null) {
+                    player.sendMessage("§c没有这个怪物模板。现有：" + mobNamesOrNone());
+                } else {
+                    session.mob = args[2].toLowerCase(Locale.ROOT);
+                    player.sendMessage("§a当前怪物 = " + session.mob);
+                }
+            }
+            case "info" -> printInfo(player, session);
+            default -> player.sendMessage("§c未知的编辑动作，输入 /dungeon edit 看用法。");
+        }
+    }
+
+    private void printInfo(Player player, TemplateEditor.Session session) {
+        player.sendMessage("§5[模板] §f" + session.name + "§7  区域：" + fmt(session.plot));
+        player.sendMessage("§7落点 " + (session.spawn == null ? "未设" : fmt(session.spawn))
+                + " §7| 检查点 " + session.checkpoints.size()
+                + " §7| 离开板 " + (session.exitPlate == null ? "未设" : fmt(session.exitPlate)));
+        player.sendMessage("§7选区 " + (session.pos1 == null ? "未设" : fmt(session.pos1))
+                + " → " + (session.pos2 == null ? "未设" : fmt(session.pos2))
+                + " §7| 当前：第 " + session.room + " 间 / 第 " + session.wave + " 波 / 怪 "
+                + (session.mob == null ? "默认" : session.mob));
+        for (Map.Entry<Integer, TemplateEditor.RoomMark> entry : session.rooms.entrySet()) {
+            TemplateEditor.RoomMark mark = entry.getValue();
+            int spawns = mark.waves.values().stream().mapToInt(List::size).sum();
+            player.sendMessage("§7  第 " + entry.getKey() + " 间：门 " + (mark.door == null ? "—" : "✓")
+                    + " 板 " + (mark.plate == null ? "—" : "✓")
+                    + " 箱 " + (mark.chest == null ? "—" : "✓")
+                    + " 刷怪点 " + spawns);
+        }
+    }
+
+    private void sendInto(Instances.Slot slot, Player player, String label) {
+        slot.modeOf.put(player.getUniqueId(), player.getGameMode());
+        instances.rememberMode(player, player.getGameMode());
+        player.setGameMode(GameMode.ADVENTURE);
+        player.teleport(slot.spawn);
+        player.playSound(player.getLocation(), Sound.ENTITY_ENDERMAN_TELEPORT, 1f, 1f);
+        player.sendMessage("§5[副本]§r 进入 " + label + " §r副本，限时 " + slot.limitMinutes + " 分钟。");
+        player.sendMessage("§7体力：" + stamina.describe(player));
+        player.sendMessage("§7脚下的磁石平台就是第一个检查点；死亡会回到最近的检查点，物品不会掉落。");
+        player.sendMessage("§7随时可以用 §f/dungeon leave §7离开副本。");
+    }
+
+    private Location feet(Player player) {
+        return player.getLocation().getBlock().getLocation().add(0.5, 0, 0.5);
+    }
+
+    private Block targetBlock(Player player) {
+        return player.getTargetBlockExact(6);
+    }
+
+    private int parseInt(String raw, int fallback) {
+        try {
+            return Integer.parseInt(raw);
+        } catch (Exception e) {
+            return fallback;
+        }
+    }
+
+    private String namesOrNone() {
+        List<String> names = editor.names();
+        return names.isEmpty() ? "（无）" : String.join(", ", names);
+    }
+
+    private String mobNamesOrNone() {
+        return mobTemplates.isEmpty() ? "（无，检查 mobs.yml）" : String.join(", ", mobTemplates.keySet());
+    }
+
+    private static String fmt(Location location) {
+        return location.getBlockX() + "," + location.getBlockY() + "," + location.getBlockZ();
+    }
+
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         if (args.length == 1) {
             String prefix = args[0].toLowerCase(Locale.ROOT);
-            return Arrays.asList("spawn", "test", "leave", "list", "tp", "release", "reload").stream()
+            return Arrays.asList("spawn", "test", "leave", "list", "tp", "release", "stamina", "edit", "template", "reload").stream()
                     .filter(s -> s.startsWith(prefix)).collect(Collectors.toList());
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("spawn")) {
@@ -754,6 +1185,10 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
 
     public boolean returnToEntrance() {
         return returnToEntrance;
+    }
+
+    public int recycleMinutes() {
+        return recycleMinutes;
     }
 
 }

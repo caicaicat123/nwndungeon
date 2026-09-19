@@ -1,0 +1,99 @@
+# 自定义怪物模板（副本刷怪点用 mob: <名字> 引用；不需要 MythicMobs）
+#
+# type            原版实体类型
+# name            头顶名字（支持 § 颜色代码）
+# health          血量
+# damage          攻击力（近战伤害属性）
+# speed           移动速度（原版僵尸约 0.23，玩家走路约 0.1）
+# equipment       装备：helmet / chestplate / leggings / boots / mainhand / offhand，可带 enchants
+# drop-equipment  true = 装备会掉；false = 不掉
+# drop-chance     可选：装备掉落概率 0~1（不写时：掉装备=1、不掉=0）
+# drops           额外掉落：item / chance(0~1) / min / max
+
+mobs:
+  zombie_grunt:
+    type: ZOMBIE
+    name: '§7僵尸兵'
+    health: 20
+    damage: 3
+    speed: 0.23
+    drop-equipment: false
+
+  zombie_elite:
+    type: ZOMBIE
+    name: '§c精英僵尸'
+    health: 60
+    damage: 8
+    speed: 0.26
+    equipment:
+      helmet:
+        item: DIAMOND_HELMET
+        enchants: { PROTECTION: 4, UNBREAKING: 3 }
+      chestplate:
+        item: DIAMOND_CHESTPLATE
+        enchants: { PROTECTION: 4 }
+      mainhand:
+        item: NETHERITE_SWORD
+        enchants: { SHARPNESS: 5, FIRE_ASPECT: 2 }
+    drop-equipment: true
+    drops:
+      - { item: DIAMOND, chance: 0.3, min: 1, max: 2 }
+      - { item: GOLDEN_APPLE, chance: 0.1, min: 1, max: 1 }
+
+  skeleton_archer:
+    type: SKELETON
+    name: '§b骷髅射手'
+    health: 30
+    damage: 5
+    speed: 0.25
+    equipment:
+      helmet:
+        item: CHAINMAIL_HELMET
+        enchants: { PROJECTILE_PROTECTION: 3 }
+      mainhand:
+        item: BOW
+        enchants: { POWER: 3 }
+    drop-equipment: false
+
+  husk_brute:
+    type: HUSK
+    name: '§6沙丘蛮兵'
+    health: 80
+    damage: 10
+    speed: 0.22
+    equipment:
+      chestplate:
+        item: IRON_CHESTPLATE
+        enchants: { PROTECTION: 3, THORNS: 2 }
+      mainhand:
+        item: IRON_AXE
+        enchants: { SHARPNESS: 3 }
+    drop-equipment: true
+    drop-chance: 0.5
+
+  boss_necromancer:
+    type: WITHER_SKELETON
+    name: '§5亡灵法师'
+    health: 200
+    damage: 12
+    speed: 0.25
+    equipment:
+      helmet:
+        item: NETHERITE_HELMET
+        enchants: { PROTECTION: 5, UNBREAKING: 3 }
+      chestplate:
+        item: NETHERITE_CHESTPLATE
+        enchants: { PROTECTION: 5, THORNS: 3 }
+      leggings:
+        item: NETHERITE_LEGGINGS
+        enchants: { PROTECTION: 4 }
+      boots:
+        item: NETHERITE_BOOTS
+        enchants: { PROTECTION: 4, FEATHER_FALLING: 4 }
+      mainhand:
+        item: NETHERITE_SWORD
+        enchants: { SHARPNESS: 6, FIRE_ASPECT: 3, KNOCKBACK: 2 }
+    drop-equipment: true
+    drops:
+      - { item: NETHERITE_SCRAP, chance: 0.5, min: 1, max: 3 }
+      - { item: ENCHANTED_GOLDEN_APPLE, chance: 0.2, min: 1, max: 1 }

@@ -1,0 +1,61 @@
+# 掉落表：**每个副本一段**（现在这三个是内置副本 iron/gold/diamond）
+# 以后用 1.5.0 编辑器做的模板副本，会用模板名在这里自动加一段，各自独立配置。
+# 改完执行 /dungeon reload 生效。
+#
+# item    物品（原版 ID，例如 DIAMOND / ENCHANTED_BOOK）
+# weight  权重：同一个池子里越大越容易被抽中
+# min/max 抽中后给几个（不写 = 补给箱 1~2、最终奖励箱 1~4）
+# chance  这一项"本次是否进入候选池"的概率 0~1（不写 = 1，一定在池里）
+#
+# 也可以只写一行物品名（等价于 weight: 1）：
+#   - BREAD
+#
+# 每个副本两栏：
+#   supply-chest  每间战斗房清完出现的补给箱
+#   reward-chest  首领房清完出现的最终奖励箱
+
+dungeons:
+  iron:
+    supply-chest:
+      - { item: GOLDEN_APPLE, weight: 1 }
+      - { item: MILK_BUCKET, weight: 1 }
+      - { item: BREAD, weight: 4, min: 1, max: 4 }
+      - { item: COOKED_BEEF, weight: 3, min: 1, max: 3 }
+      - { item: IRON_INGOT, weight: 2, min: 1, max: 3 }
+      - { item: TORCH, weight: 3, min: 4, max: 8 }
+    reward-chest:
+      - { item: DIAMOND, weight: 3, min: 1, max: 3 }
+      - { item: GOLD_BLOCK, weight: 2 }
+      - { item: ENCHANTED_BOOK, weight: 2 }
+      - { item: NETHERITE_SCRAP, weight: 1, min: 1, max: 2, chance: 0.6 }
+      - { item: ENCHANTED_GOLDEN_APPLE, weight: 1, chance: 0.25 }
+
+  gold:
+    supply-chest:
+      - { item: GOLDEN_APPLE, weight: 2 }
+      - { item: MILK_BUCKET, weight: 1 }
+      - { item: COOKED_BEEF, weight: 3, min: 2, max: 4 }
+      - { item: GOLD_INGOT, weight: 3, min: 1, max: 3 }
+      - { item: ARROW, weight: 3, min: 8, max: 16 }
+      - { item: SHIELD, weight: 1 }
+    reward-chest:
+      - { item: DIAMOND, weight: 3, min: 2, max: 4 }
+      - { item: NETHERITE_SCRAP, weight: 2, min: 1, max: 3 }
+      - { item: ENCHANTED_GOLDEN_APPLE, weight: 1, chance: 0.4 }
+      - { item: ENCHANTED_BOOK, weight: 2 }
+      - { item: DIAMOND_BLOCK, weight: 1 }
+
+  diamond:
+    supply-chest:
+      - { item: ENCHANTED_GOLDEN_APPLE, weight: 1, chance: 0.5 }
+      - { item: MILK_BUCKET, weight: 2 }
+      - { item: GOLDEN_APPLE, weight: 3, min: 1, max: 3 }
+      - { item: DIAMOND, weight: 2, min: 1, max: 3 }
+      - { item: ARROW, weight: 3, min: 16, max: 32 }
+      - { item: SHIELD, weight: 1 }
+    reward-chest:
+      - { item: NETHERITE_SCRAP, weight: 3, min: 2, max: 4 }
+      - { item: DIAMOND_BLOCK, weight: 2 }
+      - { item: ENCHANTED_GOLDEN_APPLE, weight: 2, chance: 0.6 }
+      - { item: ENCHANTED_BOOK, weight: 2 }
+      - { item: DIAMOND, weight: 3, min: 3, max: 6 }

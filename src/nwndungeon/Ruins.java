@@ -1,6 +1,7 @@
 package nwndungeon;
 
 import org.bukkit.Material;
+import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockFace;
@@ -26,7 +27,8 @@ public final class Ruins {
     private Ruins() {
     }
 
-    public static void build(World world, int x, int y, int z, Tier tier, Random random) {
+    /** 生成遗迹，返回门旁按钮的位置（用于登记"按钮 → 入口"）。 */
+    public static Location build(World world, int x, int y, int z, Tier tier, Random random) {
         String id = tier == null ? "iron" : tier.id();
         Material tierBlock = tier == null ? Material.IRON_BLOCK : tier.floorBlock();
         String tierName = tier == null ? "§f普通" : tier.display();
@@ -43,6 +45,7 @@ public final class Ruins {
         buildWalls(world, x, z, half, baseY, wallHeight, random);
         buildDoorFrame(world, x, y, z, tierBlock, tierName);
         decorate(world, x, z, half, baseY, wallHeight, random);
+        return new Location(world, x + 1, y + 1, z);
     }
 
     // ---------------------------------------------------------------- 地基与地板
