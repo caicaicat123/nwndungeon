@@ -1,4 +1,4 @@
-﻿# 编译 NWNDungeon：javac -> jar。产物在 dist\nwndungeon-<plugin.yml 里的版本>.jar
+# 编译 NWNDungeon：javac -> jar。产物在 dist\nwndungeon-<plugin.yml 里的版本>.jar
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSCommandPath
 $jdk = 'C:\Program Files\Java\jdk-21\bin'
@@ -50,5 +50,11 @@ if (Test-Path (Join-Path $root 'party.yml')) {
 }
 
 $jar = Join-Path $dist ("nwndungeon-$version.jar")
+$before = if (Test-Path $jar) { (Get-Item $jar).LastWriteTime } else { $null }
 & "$jdk\jar.exe" --create --file $jar -C $classes .
+if ($LASTEXITCODE -ne 0) { throw '打包失败（jar 退出码 ' + $LASTEXITCODE + '）' }
+# 防"假成功"：jar 写不进去时（例如 ACL 拒绝）不能再打印已生成
+if ($before -and (Get-Item $jar).LastWriteTime -eq $before) {
+    throw 'jar 没有更新（可能被 ACL/占用挡住）→ 用提权会话重跑，或先删掉旧的 ' + $jar
+}
 Write-Output ("已生成: " + $jar + "  (" + [math]::Round((Get-Item $jar).Length / 1KB, 1) + " KB)")
