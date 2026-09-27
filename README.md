@@ -21,6 +21,8 @@
 - **通关结算**：首领房清完弹出结算界面（用时 / 击杀 / 死亡 / 最终奖励 / 评级），界面只读
 - **S/A/B 评级**：用时 ≤ 限时一半且零死亡 = S；≤ 3/4 限时且最多死一次 = A；其余 B
 - **副本内是冒险模式**：能拉机关、开箱子，不能破坏或放置方块，爆炸一律禁止
+- **副本内只能用 `/dungeon`**：进本后其它命令一律被拦下（默认额外放行聊天 / 私聊与登录类命令，
+  名单在 `config.yml` 的 `rules.allowed-commands`；有 `nwndungeon.admin` 权限的人不受这条限制）
 - **检查点**：磁石平台（带告示牌），踩上去记录、死亡后回到最近记录的那一个；**大厅那块就铺在出生点正下方 —— 进本第一脚即检查点**，其余检查点在偶数房间西侧（避开刷怪点）
 - **通关**：首领房的怪物清完后给最终奖励箱，房间中央出现一扇木门，右键即可离开副本
 - **死亡不掉落**，限时到点自动送回门口
@@ -34,6 +36,7 @@
 | `/dungeon leave` | `nwndungeon.use` | 离开副本 |
 | `/dungeon list` | `nwndungeon.admin` | 查看槽位占用 |
 | `/dungeon locate [难度\|any]` | 所有人 | 找离你最近的自然生成副本入口（距离 / 方位 / 坐标） |
+| `/dungeon stamina` | `nwndungeon.use` | 查看自己的体力（当前 / 上限 / 下一点回复 / 各难度消耗） |
 | `/dungeon tp <槽位>` | `nwndungeon.admin` | 传送到指定槽位 |
 | `/dungeon release <槽位\|all>` | `nwndungeon.admin` | 手动回收槽位（里面的玩家会被送回入口） |
 | `/dungeon reload` | `nwndungeon.admin` | 重载配置 |
@@ -43,7 +46,7 @@
 | 节点 | 默认 | 说明 |
 | --- | --- | --- |
 | `nwndungeon.use` | `true`（所有人） | 用副本入口：按下门旁按钮时会被一起带进副本；`/dungeon leave` 也需要它 |
-| `nwndungeon.admin` | `op` | 管理指令：`/dungeon spawn`、`test`、`list`、`tp`、`reload` |
+| `nwndungeon.admin` | `op` | 管理指令：`/dungeon spawn`、`test`、`list`、`tp`、`release`、`reload`；**并且在副本里不受「只能用 /dungeon」这条限制** |
 
 ## PlaceholderAPI 占位符
 
@@ -96,7 +99,8 @@ LuckPerms 用法：
 ## 编译
 
 ```powershell
-powershell -File build.ps1
+# 用 PowerShell 7（pwsh）跑；Windows PowerShell 5.1 会把 UTF-8 脚本按 ANSI 读，中文注释会导致语法报错
+pwsh -File build.ps1
 ```
 
 - 依赖：把 `paper-api.jar` 放进项目根目录的 `lib\`（构建时会把 `lib\*.jar` 全部加进 classpath）；没放就退回本机约定路径 `simpfun-ops\opsbridge\lib`

@@ -37,6 +37,7 @@ import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.block.Action;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryCloseEvent;
+import org.bukkit.event.player.PlayerCommandPreprocessEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
@@ -49,6 +50,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -68,6 +70,16 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
     private final Random random = new Random();
     /** 1.5.0 的副本编辑器先关着（用户 2026-09-19：1.5.0 先放放，1.4.x 照改）。 */
     private static final boolean EDITOR_ENABLED = false;
+    /**
+     * 老配置里还没有 {@code rules.allowed-commands} 这一段时用的兜底白名单。
+     *
+     * 没有它就会出现最坏的情况：升级 jar 但没动配置 → 白名单是空的 → 连 `/login` 都被拦，
+     * 而掉线接续恰好会把玩家直接放回副本世界，人就真卡在里面了。
+     */
+    private static final List<String> DEFAULT_ALLOWED_COMMANDS = List.of(
+            "msg", "tell", "w", "whisper", "r", "reply", "mail",
+            "login", "l", "log", "register", "reg", "unregister", "unreg",
+            "changepassword", "cp", "captcha", "email");
     private final Map<String, Tier> tiers = new LinkedHashMap<>();
     private final Set<String> genWorlds = new HashSet<>();
     private final Set<Material> groundBlocks = new HashSet<>();
@@ -93,6 +105,9 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
     private boolean allowPlace;
     private boolean disableExplosions;
     private boolean returnToEntrance;
+    /** 副本里禁止使用其它命令（只放行 /dungeon 与 allowedCommands）。 */
+    private boolean blockOtherCommands;
+    private final Set<String> allowedCommands = new LinkedHashSet<>();
     private String instanceWorld;
     private int slotCount;
     private int slotSpacing;
@@ -239,6 +254,20 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
         allowPlace = cfg.getBoolean("rules.allow-block-place", false);
         disableExplosions = cfg.getBoolean("rules.disable-explosions", true);
         returnToEntrance = cfg.getBoolean("rules.return-to-entrance", true);
+        blockOtherCommands = cfg.getBoolean("rules.block-other-commands", true);
+        allowedCommands.clear();
+        // 配置里**压根没有**这一段（老配置升级上来的情况）→ 用兜底名单；
+        // 显式写了空列表（用户就是想全拦）→ 尊重用户的写法，不用兜底
+        List<String> rawAllowed = cfg.getStringList("rules.allowed-commands");
+        if (rawAllowed.isEmpty() && !cfg.isSet("rules.allowed-commands")) {
+            rawAllowed = DEFAULT_ALLOWED_COMMANDS;
+        }
+        for (String raw : rawAllowed) {
+            String name = normalizeCommand(raw);
+            if (!name.isEmpty()) {
+                allowedCommands.add(name);
+            }
+        }
         if (stamina != null) {
             stamina.reload();
         }
@@ -520,6 +549,75 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
             }
         }
         return result;
+    }
+
+    // ------------------------------------------------------------ 副本内命令限制
+
+    /**
+     * 副本里只让用 /dungeon（外加配置里的白名单命令），其它命令一律拦掉。
+     *
+     * 两个要点：
+     * - 用 LOWEST 优先级取消，这样 Bukkit 的原版命令分发根本不会发生；
+     * - **登录类命令必须留在白名单里**：掉线接续会把玩家直接放回副本世界，
+     *   这时 AuthMe 要玩家先 /login，要是连它都拦了人就真卡死了。
+     *
+     * 有 {@code nwndungeon.admin}（默认 op）的人不受限制，方便管理员在副本里调试。
+     */
+    @EventHandler(priority = EventPriority.LOWEST)
+    public void onCommandPreprocess(PlayerCommandPreprocessEvent event) {
+        if (!blockOtherCommands || instances == null || !instances.ready()) {
+            return;
+        }
+        Player player = event.getPlayer();
+        if (player.hasPermission("nwndungeon.admin")) {
+            return;
+        }
+        if (instances.byPlayer(player.getUniqueId()) == null) {
+            return;   // 不在副本里（含还在读条阶段）不限制
+        }
+        String label = commandLabel(event.getMessage());
+        if (label.isEmpty() || label.equals("dungeon") || allowedCommands.contains(label)) {
+            return;
+        }
+        event.setCancelled(true);
+        player.sendMessage("§5[副本]§r §c副本里不能用这个命令。");
+        player.sendMessage("§7离开副本：§f/dungeon leave§7；可用：§f" + allowedSummary());
+    }
+
+    /** 从 "/dungeon leave" 里取出命令名 "dungeon"（去掉斜杠、命名空间前缀与参数，转小写）。 */
+    private static String commandLabel(String message) {
+        if (message == null || message.length() < 2 || message.charAt(0) != '/') {
+            return "";
+        }
+        String label = message.substring(1).trim().split("\\s+", 2)[0].toLowerCase(Locale.ROOT);
+        int colon = label.indexOf(':');
+        return colon >= 0 ? label.substring(colon + 1) : label;
+    }
+
+    /** 把配置里的白名单项统一成命令名（容忍写成 "/msg" 或 "MSG"）。 */
+    private static String normalizeCommand(String raw) {
+        if (raw == null) {
+            return "";
+        }
+        String text = raw.trim().toLowerCase(Locale.ROOT);
+        while (text.startsWith("/")) {
+            text = text.substring(1);
+        }
+        return commandLabel("/" + text);
+    }
+
+    /** 提示里那串可用命令（太长就截断，别刷屏）。 */
+    private String allowedSummary() {
+        StringBuilder builder = new StringBuilder("/dungeon");
+        int shown = 0;
+        for (String allowed : allowedCommands) {
+            if (shown++ >= 5) {
+                builder.append(" …");
+                break;
+            }
+            builder.append(", /").append(allowed);
+        }
+        return builder.toString();
     }
 
     // ------------------------------------------------------------ 保护规则

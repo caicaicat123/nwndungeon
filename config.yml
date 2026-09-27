@@ -157,3 +157,31 @@ rules:
   disable-explosions: true
   # 玩家进副本前的位置记下来，出来时送回门口
   return-to-entrance: true
+  # 副本里禁止使用其它命令（只放行 /dungeon 与下面 allowed-commands 里列的命令）
+  # 有 nwndungeon.admin 权限（默认 op）的人**不受**这条限制，方便管理员在副本里调试
+  # 判断依据是"玩家是否正占着一个副本槽位"，所以入口读条那 3 秒不算
+  block-other-commands: true
+  # 额外放行的命令（不带斜杠，大小写随意）
+  # 登录类命令**必须留着**：掉线接续会把玩家直接放回副本世界，那时 AuthMe 要求先 /login，
+  # 要是把 /login 也拦了，人就真的卡在副本里出不来了
+  allowed-commands:
+    # 聊天 / 私聊（Essentials）
+    - msg
+    - tell
+    - w
+    - whisper
+    - r
+    - reply
+    - mail
+    # 登录（AuthMe 及其别名）
+    - login
+    - l
+    - log
+    - register
+    - reg
+    - unregister
+    - unreg
+    - changepassword
+    - cp
+    - captcha
+    - email
