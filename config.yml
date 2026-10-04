@@ -86,7 +86,9 @@ tiers:
         - "ZOMBIE:3"
         - "SKELETON:2"
       guards: "ZOMBIE:3,SKELETON:2"
-    # 掉落表在独立文件 plugins/NWNDungeon/loot.yml（按难度分栏，支持 weight/min/max/chance）
+    # 掉落表在独立文件 plugins/NWNDungeon/loot.yml
+    # （按难度分栏；支持 weight/min/max/chance，以及 enchants 写死附魔 /
+    #  random-enchants 随机附魔 —— 附魔书不会再出现"有名字没附魔"的空书）
   gold:
     display: '§6困难'
     block: GOLD_BLOCK
@@ -174,6 +176,12 @@ rules:
     - reply
     - mail
     # 登录（AuthMe 及其别名）
+    # ⚠️ 这几行是照服务器上真实存在的命令逐个核过的（2026-09-27 用 RCON 试执行确认）：
+    #    login / l / log → /login；register / reg；unregister / unreg；
+    #    changepassword / cp；captcha / verification（同一个验证码命令的两个名字）；
+    #    email（子命令 show/add/change/recover/code/setpassword 不用单列，认根命令名即可）
+    #    实测不存在的别名（verify / addemail / changeemail / setemail）就不用写了
+    #    /logout 也有，但故意不放行：它只会把人变成未登录状态，拦掉不影响自救
     - login
     - l
     - log
@@ -184,4 +192,5 @@ rules:
     - changepassword
     - cp
     - captcha
+    - verification
     - email

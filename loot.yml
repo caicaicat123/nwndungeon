@@ -2,20 +2,33 @@
 # 以后用 1.5.0 编辑器做的模板副本，会用模板名在这里自动加一段，各自独立配置。
 # 改完执行 /dungeon reload 生效。
 #
-# item    物品（原版 ID，例如 DIAMOND / ENCHANTED_BOOK）
-# weight  权重：同一个池子里越大越容易被抽中
-# min/max 抽中后给几个（不写 = 补给箱 1~2、最终奖励箱 1~4）
-# chance  这一项"本次是否进入候选池"的概率 0~1（不写 = 1，一定在池里）
+# item             物品（原版 ID，例如 DIAMOND / ENCHANTED_BOOK）
+# weight           权重：同一个池子里越大越容易被抽中
+# min/max          抽中后给几个（不写 = 补给箱 1~2、最终奖励箱 1~4）
+# chance           这一项"本次是否进入候选池"的概率 0~1（不写 = 1，一定在池里）
+# enchants         写死的附魔：{ SHARPNESS: 3, UNBREAKING: 2 }
+#                  —— 写了就完全按它来，等级不夹（写 6 就给 6）
+# random-enchants  随机附魔条数：写 2 = 固定 2 条，写 [1, 3] = 1~3 条
+#                  —— 附魔名与等级从本段的 enchant-pool / enchant-levels 取，
+#                     随机出来的等级按原版上限夹一下
+#                  —— 两种都不写、物品又是附魔书时，插件会自动补随机附魔：
+#                     空附魔书（有名字没附魔）在原版里是废纸，铁砧上也用不了
 #
 # 也可以只写一行物品名（等价于 weight: 1）：
 #   - BREAD
 #
-# 每个副本两栏：
-#   supply-chest  每间战斗房清完出现的补给箱
-#   reward-chest  首领房清完出现的最终奖励箱
+# 每个副本下面的键：
+#   supply-chest   每间战斗房清完出现的补给箱
+#   reward-chest   首领房清完出现的最终奖励箱
+#   enchant-pool   随机附魔的候选池（原版附魔 ID，大小写都行）
+#   enchant-levels 随机附魔的等级区间 [最小, 最大]
+#
+# 难度递进：铁 = 1 条低级书 ／ 金 = 1~2 条中级 ／ 钻 = 2~3 条高级
 
 dungeons:
   iron:
+    enchant-pool: [SHARPNESS, PROTECTION, EFFICIENCY, UNBREAKING, POWER, KNOCKBACK]
+    enchant-levels: [1, 2]
     supply-chest:
       - { item: GOLDEN_APPLE, weight: 1 }
       - { item: MILK_BUCKET, weight: 1 }
@@ -26,11 +39,15 @@ dungeons:
     reward-chest:
       - { item: DIAMOND, weight: 3, min: 1, max: 3 }
       - { item: GOLD_BLOCK, weight: 2 }
-      - { item: ENCHANTED_BOOK, weight: 2 }
+      # 普通：1 条低级附魔书；另有一条小概率的经验修补（写死附魔的示例）
+      - { item: ENCHANTED_BOOK, weight: 3, random-enchants: 1 }
+      - { item: ENCHANTED_BOOK, weight: 1, chance: 0.2, enchants: { MENDING: 1 } }
       - { item: NETHERITE_SCRAP, weight: 1, min: 1, max: 2, chance: 0.6 }
       - { item: ENCHANTED_GOLDEN_APPLE, weight: 1, chance: 0.25 }
 
   gold:
+    enchant-pool: [SHARPNESS, PROTECTION, EFFICIENCY, UNBREAKING, FIRE_ASPECT, THORNS, LOOTING, POWER, FEATHER_FALLING]
+    enchant-levels: [2, 3]
     supply-chest:
       - { item: GOLDEN_APPLE, weight: 2 }
       - { item: MILK_BUCKET, weight: 1 }
@@ -41,11 +58,15 @@ dungeons:
     reward-chest:
       - { item: DIAMOND, weight: 3, min: 2, max: 4 }
       - { item: NETHERITE_SCRAP, weight: 2, min: 1, max: 3 }
+      # 困难：1~2 条中级附魔书
+      - { item: ENCHANTED_BOOK, weight: 3, random-enchants: [1, 2] }
+      - { item: ENCHANTED_BOOK, weight: 1, chance: 0.3, enchants: { MENDING: 1 } }
       - { item: ENCHANTED_GOLDEN_APPLE, weight: 1, chance: 0.4 }
-      - { item: ENCHANTED_BOOK, weight: 2 }
       - { item: DIAMOND_BLOCK, weight: 1 }
 
   diamond:
+    enchant-pool: [SHARPNESS, PROTECTION, EFFICIENCY, UNBREAKING, FIRE_ASPECT, THORNS, LOOTING, FORTUNE, POWER, PUNCH, FEATHER_FALLING, RESPIRATION, DEPTH_STRIDER]
+    enchant-levels: [3, 4]
     supply-chest:
       - { item: ENCHANTED_GOLDEN_APPLE, weight: 1, chance: 0.5 }
       - { item: MILK_BUCKET, weight: 2 }
@@ -56,6 +77,8 @@ dungeons:
     reward-chest:
       - { item: NETHERITE_SCRAP, weight: 3, min: 2, max: 4 }
       - { item: DIAMOND_BLOCK, weight: 2 }
+      # 噩梦：2~3 条高级附魔书；经验修补那条固定带 3 级耐久
+      - { item: ENCHANTED_BOOK, weight: 3, random-enchants: [2, 3] }
+      - { item: ENCHANTED_BOOK, weight: 1, chance: 0.5, enchants: { MENDING: 1, UNBREAKING: 3 } }
       - { item: ENCHANTED_GOLDEN_APPLE, weight: 2, chance: 0.6 }
-      - { item: ENCHANTED_BOOK, weight: 2 }
       - { item: DIAMOND, weight: 3, min: 3, max: 6 }

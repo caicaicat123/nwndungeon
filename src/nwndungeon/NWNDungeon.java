@@ -75,11 +75,14 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
      *
      * 没有它就会出现最坏的情况：升级 jar 但没动配置 → 白名单是空的 → 连 `/login` 都被拦，
      * 而掉线接续恰好会把玩家直接放回副本世界，人就真卡在里面了。
+     *
+     * 名单按服务器上**真实存在的命令**逐个核过（2026-09-27 用 RCON 试执行）：
+     * `verification` 是 AuthMe 验证码命令的另一个名字（`/captcha` 的别名），1.4.11 一开始漏了它。
      */
     private static final List<String> DEFAULT_ALLOWED_COMMANDS = List.of(
             "msg", "tell", "w", "whisper", "r", "reply", "mail",
             "login", "l", "log", "register", "reg", "unregister", "unreg",
-            "changepassword", "cp", "captcha", "email");
+            "changepassword", "cp", "captcha", "verification", "email");
     private final Map<String, Tier> tiers = new LinkedHashMap<>();
     private final Set<String> genWorlds = new HashSet<>();
     private final Set<Material> groundBlocks = new HashSet<>();
@@ -1350,6 +1353,11 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
 
     public Tier tier(String id) {
         return id == null ? null : tiers.get(id.toLowerCase(Locale.ROOT));
+    }
+
+    /** 掉落表（含每个副本的随机附魔池）；`/dungeon reload` 会换成新实例，别缓存它。 */
+    public LootTables lootTables() {
+        return lootTables;
     }
 
     public String instanceWorldName() {

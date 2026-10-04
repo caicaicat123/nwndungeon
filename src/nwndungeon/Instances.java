@@ -5,6 +5,7 @@ import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
+import org.bukkit.Registry;
 import org.bukkit.Sound;
 import org.bukkit.Tag;
 import org.bukkit.World;
@@ -19,6 +20,7 @@ import org.bukkit.boss.BossBar;
 import org.bukkit.block.Chest;
 import org.bukkit.block.data.Powerable;
 import org.bukkit.block.data.type.Door;
+import org.bukkit.enchantments.Enchantment;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.EntityType;
 import org.bukkit.entity.LivingEntity;
@@ -26,18 +28,23 @@ import org.bukkit.entity.Player;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.EnchantmentStorageMeta;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.GameRule;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 import java.util.UUID;
 
 /** 副本世界的槽位管理：分配、生成、房间推进、传送、回收。 */
@@ -315,7 +322,7 @@ public final class Instances {
             }
             if (room.chestSpot != null && tier != null) {
                 // 抽好的奖励留一份，通关结算界面里展示
-                Map<Integer, ItemStack> loot = rollLoot(tier.rewardItems(), 7, true);
+                Map<Integer, ItemStack> loot = rollLoot(tier.rewardItems(), 7, true, slot.tier);
                 slot.lastReward = new ArrayList<>(loot.values());
                 placeChest(room.chestSpot, loot);
             }
@@ -326,7 +333,7 @@ public final class Instances {
             return;
         }
         if (room.chestSpot != null && tier != null) {
-            fillChest(room.chestSpot, tier.supplyItems(), 3, false);
+            fillChest(room.chestSpot, tier.supplyItems(), 3, false, slot.tier);
         }
         if (room.plateSpot != null) {
             placePlate(room.plateSpot);
@@ -378,11 +385,11 @@ public final class Instances {
      * 拿到的快照背包是个空壳，填完再 update() 写回去等于把空背包覆盖回去 ——
      * 箱子就是空的。所以先放箱子，下一 tick 再用实时状态直接改世界里的容器。
      */
-    private void fillChest(Location location, List<LootEntry> pool, int maxTypes, boolean rich) {
+    private void fillChest(Location location, List<LootEntry> pool, int maxTypes, boolean rich, String tierId) {
         if (pool.isEmpty()) {
             return;
         }
-        placeChest(location, rollLoot(pool, maxTypes, rich));
+        placeChest(location, rollLoot(pool, maxTypes, rich, tierId));
     }
 
     /** 先放箱子，下一 tick 再写内容（新放下的方块实体要等一 tick 才稳定）。 */
@@ -395,7 +402,7 @@ public final class Instances {
      * 抽奖励：随机格子 + 按权重抽物品 + 每件物品自己的数量区间（单箱 27 格）。
      * 先按 chance 筛出本次候选（chance=1 的一直在池里），再按 weight 加权抽取。
      */
-    private Map<Integer, ItemStack> rollLoot(List<LootEntry> pool, int maxTypes, boolean rich) {
+    private Map<Integer, ItemStack> rollLoot(List<LootEntry> pool, int maxTypes, boolean rich, String tierId) {
         int types = rich ? maxTypes : 1 + random.nextInt(Math.min(3, maxTypes));
         Map<Integer, ItemStack> loot = new LinkedHashMap<>();
         if (pool.isEmpty()) {
@@ -426,9 +433,95 @@ public final class Instances {
                 max = min;
             }
             int amount = min + random.nextInt(max - min + 1);
-            loot.put(slot, new ItemStack(picked.material(), Math.max(1, amount)));
+            ItemStack stack = new ItemStack(picked.material(), Math.max(1, amount));
+            applyEnchants(stack, picked, tierId);
+            loot.put(slot, stack);
         }
         return loot;
+    }
+
+    // ---------------------------------------------------------------- 掉落物的附魔
+
+    /** 附魔名 → Enchantment 的缓存；值为 null 表示这个名字不认识（缓存下来别反复查）。 */
+    private final Map<String, Enchantment> enchantCache = new HashMap<>();
+    private final Set<String> unknownEnchantWarned = new HashSet<>();
+
+    /** 按名字取附魔；名字不认识时只警告一次，方便在日志里发现写错，又不会刷屏。 */
+    private Enchantment enchant(String name) {
+        if (name == null || name.isBlank()) {
+            return null;
+        }
+        String key = name.toLowerCase(Locale.ROOT);
+        if (enchantCache.containsKey(key)) {
+            return enchantCache.get(key);
+        }
+        Enchantment found = Registry.ENCHANTMENT.get(NamespacedKey.minecraft(key));
+        if (found == null && unknownEnchantWarned.add(key)) {
+            plugin.getLogger().warning("loot.yml 里有不认识的附魔名：" + name
+                    + "（已跳过；要用原版附魔 ID，例如 SHARPNESS / PROTECTION / MENDING）");
+        }
+        enchantCache.put(key, found);
+        return found;
+    }
+
+    /**
+     * 给一件掉落物上附魔。
+     *
+     * <p>配了 {@code enchants} 就完全按写死的来（等级不夹，写 6 就给 6）；否则配了
+     * {@code random-enchants}、或者这是"一条附魔都没有的附魔书"，就按该副本的
+     * {@code enchant-pool} / {@code enchant-levels} 随机抽，随机出来的等级按原版上限夹一下。
+     *
+     * <p>附魔书写进 {@link EnchantmentStorageMeta}（存储附魔）—— 普通附魔挂在书上铁砧读不到。
+     */
+    private void applyEnchants(ItemStack stack, LootEntry entry, String tierId) {
+        if (entry.hasEnchants()) {
+            entry.enchants().forEach((name, level) -> {
+                Enchantment enchantment = enchant(name);
+                if (enchantment != null) {
+                    addEnchant(stack, enchantment, Math.max(1, level), false);
+                }
+            });
+            return;
+        }
+        if (!entry.wantsRandomEnchants() && !entry.isBlankEnchantedBook()) {
+            return;
+        }
+        List<String> pool = plugin.lootTables().enchantPool(tierId);
+        if (pool.isEmpty()) {
+            return;
+        }
+        int[] levels = plugin.lootTables().enchantLevelRange(tierId);
+        int min = entry.wantsRandomEnchants() ? Math.max(1, entry.randomEnchantMin()) : 1;
+        int max = entry.wantsRandomEnchants() ? Math.max(min, entry.randomEnchantMax()) : 2;
+        int count = min + random.nextInt(max - min + 1);
+        List<String> shuffled = new ArrayList<>(pool);
+        Collections.shuffle(shuffled, random);
+        Set<Enchantment> chosen = new HashSet<>();
+        for (String name : shuffled) {
+            if (count <= 0) {
+                break;
+            }
+            Enchantment enchantment = enchant(name);
+            if (enchantment == null || !chosen.add(enchantment)) {
+                continue;
+            }
+            int level = levels[0] + random.nextInt(Math.max(1, levels[1] - levels[0] + 1));
+            addEnchant(stack, enchantment, level, true);
+            count--;
+        }
+    }
+
+    /** 加一条附魔；clamp=true 时按原版上限夹一下等级（随机附魔用，别随机出离谱的东西）。 */
+    private static void addEnchant(ItemStack stack, Enchantment enchantment, int level, boolean clamp) {
+        int value = clamp ? Math.min(level, enchantment.getMaxLevel()) : level;
+        if (stack.getType() == Material.ENCHANTED_BOOK) {
+            if (stack.getItemMeta() instanceof EnchantmentStorageMeta meta) {
+                meta.addStoredEnchant(enchantment, value, true);
+                stack.setItemMeta(meta);
+            }
+            return;
+        }
+        stack.addUnsafeEnchantment(enchantment, value);
     }
 
     private LootEntry pick(List<LootEntry> candidates, int totalWeight) {

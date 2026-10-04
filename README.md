@@ -96,6 +96,20 @@ LuckPerms 用法：
 /lp group helper  permission set nwndungeon.admin true
 ```
 
+## 掉落表（`loot.yml`）
+
+`plugins/NWNDungeon/loot.yml` 按副本分段写**补给箱**与**最终奖励箱**，改完 `/dungeon reload` 生效：
+
+| 键 | 说明 |
+| --- | --- |
+| `item` | 物品（原版 ID） |
+| `weight` / `min` / `max` / `chance` | 权重 / 数量区间 / 本次是否进候选池（0~1） |
+| `enchants: { SHARPNESS: 3 }` | 写死附魔，等级不夹（写 6 就是 6） |
+| `random-enchants: 2` 或 `[1, 3]` | 随机附魔条数；附魔名与等级从该段的 `enchant-pool` / `enchant-levels` 取，等级按原版上限夹 |
+
+**附魔书不会再出空书**：两个附魔键都没写、物品又是附魔书时，插件会自动补随机附魔
+（空附魔书在原版里是废纸，铁砧上也用不了）。附魔名写错只会在日志里警告一次并跳过。
+
 ## 编译
 
 ```powershell
