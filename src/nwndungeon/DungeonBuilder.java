@@ -271,7 +271,11 @@ public final class DungeonBuilder {
         }
         room.waveIndex = waveIndex;
         room.wavePending = false;
+        room.pendingWave = -1;
+        room.emptySince = 0;
         room.mobs.clear();
+        room.lastSeen.clear();
+        room.missingSeconds.clear();
         int rx = room.origin.getBlockX();
         int oy = room.origin.getBlockY();
         int oz = room.origin.getBlockZ();
@@ -284,6 +288,8 @@ public final class DungeonBuilder {
             if (entity != null) {
                 entity.setPersistent(true);
                 room.mobs.add(entity.getUniqueId());
+                // 记下"最后一次见到它"的位置：查不到实体时用它判断区块加载没加载
+                room.lastSeen.put(entity.getUniqueId(), location.clone());
             }
             placed++;
         }
@@ -293,7 +299,11 @@ public final class DungeonBuilder {
         room.initialMobs = room.mobs.size();
     }
 
-    private static void spawnBoss(World world, Dungeon.Room room, Tier tier) {
+    /**
+     * 刷首领。1.4.13 起改成 public：首领取不到时房间逻辑要能在原地补刷一只，
+     * 而不是把"名单空了"当成通关（否则活着的首领会白送通关）。
+     */
+    public static void spawnBoss(World world, Dungeon.Room room, Tier tier) {
         Location center = room.center != null ? room.center
                 : room.origin.clone().add(ROOM / 2.0 + 0.5, 1, ROOM / 2.0 + 0.5);
         EntityType type;
@@ -307,6 +317,7 @@ public final class DungeonBuilder {
             return;
         }
         boss.setPersistent(true);
+        room.bossKilled = false;
         boss.setCustomName(tier.bossName());
         boss.setCustomNameVisible(true);
         try {
@@ -331,6 +342,8 @@ public final class DungeonBuilder {
         }
         room.bossId = boss.getUniqueId();
         room.mobs.add(boss.getUniqueId());
+        room.lastSeen.put(boss.getUniqueId(), center.clone());
+        room.missingSeconds.remove(boss.getUniqueId());
     }
 
     // ---------------------------------------------------------------- 工具

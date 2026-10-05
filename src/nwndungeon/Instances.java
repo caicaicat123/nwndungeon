@@ -52,6 +52,14 @@ public final class Instances {
 
     /** 一波清完到下一波刷出的间隔（tick）。 */
     private static final long WAVE_DELAY_TICKS = 60L;
+    /** 在"已加载的区块里"连续查不到这么多秒，才允许把这支怪从名单剔除（1.4.13）。 */
+    private static final int MISSING_SECONDS_BEFORE_DROP = 5;
+    /** 名单空着超过这么久还没推进 → 判定卡死，强制推进（1.4.13）。 */
+    private static final long STUCK_ROOM_MS = 10_000L;
+    /** 等下一波的时间远超 3 秒（说明刷怪任务没跑成）→ 强制重刷（1.4.13）。 */
+    private static final long STUCK_WAVE_MS = 15_000L;
+    /** 首领补刷上限，防止无限补刷（1.4.13）。 */
+    private static final int MAX_BOSS_RESPAWNS = 3;
 
     public static final class Slot {
         public final int index;
@@ -74,6 +82,12 @@ public final class Instances {
         public boolean manualHold;
         public Dungeon dungeon;
         public BossBar bar;
+        /** 进行中给这个槽位挂的区块票据范围（区块坐标，闭区间）；没挂时 ticketed=false。 */
+        public boolean ticketed;
+        public int ticketMinChunkX;
+        public int ticketMinChunkZ;
+        public int ticketMaxChunkX;
+        public int ticketMaxChunkZ;
 
         Slot(int index, Location origin) {
             this.index = index;
@@ -252,6 +266,7 @@ public final class Instances {
             hall.cleared = true;
             grantRewards(slot, hall);
             refreshBar(slot);
+            applyChunkTickets(slot);
             return slot;
         }
         return null;
@@ -308,6 +323,86 @@ public final class Instances {
             if (!(entity instanceof Player)) {
                 entity.remove();
             }
+        }
+    }
+
+    // ---------------------------------------------------------------- 区块票据（1.4.13）
+
+    /**
+     * 给进行中的副本挂区块票据，把副本范围的区块钉住、不让它们卸载。
+     *
+     * <p>为什么必须这么做：判断"这支怪还在不在"用的是 {@code Bukkit.getEntity(uuid)}，
+     * 而它对**区块没加载的活怪**返回 null —— 于是活着的首领会在一瞬间被当成"已消失"：
+     * 房间可能被提前判通关（结算时有时无、血条瞬间 0/60），被误剔除名单的怪还活着，
+     * 之后会顺着已开的门在副本里乱走（"上一关的怪跑到下一关"）。
+     * 钉住区块后，"查不到"就只剩"真的没了"一种含义。
+     */
+    private void applyChunkTickets(Slot slot) {
+        dropChunkTickets(slot);
+        if (world == null || slot.dungeon == null) {
+            return;
+        }
+        int minX = Integer.MAX_VALUE;
+        int minZ = Integer.MAX_VALUE;
+        int maxX = Integer.MIN_VALUE;
+        int maxZ = Integer.MIN_VALUE;
+        for (Dungeon.Room room : slot.dungeon.rooms) {
+            if (room.origin == null) {
+                continue;
+            }
+            minX = Math.min(minX, room.origin.getBlockX() - 16);
+            maxX = Math.max(maxX, room.origin.getBlockX() + DungeonBuilder.ROOM + 16);
+            minZ = Math.min(minZ, room.origin.getBlockZ() - 16);
+            maxZ = Math.max(maxZ, room.origin.getBlockZ() + DungeonBuilder.ROOM + 16);
+        }
+        for (Location checkpoint : slot.dungeon.checkpoints) {
+            if (checkpoint == null) {
+                continue;
+            }
+            minX = Math.min(minX, checkpoint.getBlockX() - 16);
+            maxX = Math.max(maxX, checkpoint.getBlockX() + 16);
+            minZ = Math.min(minZ, checkpoint.getBlockZ() - 16);
+            maxZ = Math.max(maxZ, checkpoint.getBlockZ() + 16);
+        }
+        if (slot.lastPasteMin != null && slot.lastPasteMax != null) {
+            minX = Math.min(minX, slot.lastPasteMin.getBlockX() - 16);
+            maxX = Math.max(maxX, slot.lastPasteMax.getBlockX() + 16);
+            minZ = Math.min(minZ, slot.lastPasteMin.getBlockZ() - 16);
+            maxZ = Math.max(maxZ, slot.lastPasteMax.getBlockZ() + 16);
+        }
+        if (minX > maxX || minZ > maxZ) {
+            return;
+        }
+        slot.ticketMinChunkX = minX >> 4;
+        slot.ticketMinChunkZ = minZ >> 4;
+        slot.ticketMaxChunkX = maxX >> 4;
+        slot.ticketMaxChunkZ = maxZ >> 4;
+        for (int cx = slot.ticketMinChunkX; cx <= slot.ticketMaxChunkX; cx++) {
+            for (int cz = slot.ticketMinChunkZ; cz <= slot.ticketMaxChunkZ; cz++) {
+                world.addPluginChunkTicket(cx, cz, plugin);
+            }
+        }
+        slot.ticketed = true;
+    }
+
+    /** 撤掉某个槽位的区块票据（回收槽位时调用）。 */
+    private void dropChunkTickets(Slot slot) {
+        if (!slot.ticketed || world == null) {
+            slot.ticketed = false;
+            return;
+        }
+        for (int cx = slot.ticketMinChunkX; cx <= slot.ticketMaxChunkX; cx++) {
+            for (int cz = slot.ticketMinChunkZ; cz <= slot.ticketMaxChunkZ; cz++) {
+                world.removePluginChunkTicket(cx, cz, plugin);
+            }
+        }
+        slot.ticketed = false;
+    }
+
+    /** 插件卸载 / 关服前把所有槽位的票据撤掉，别把区块钉到下一个生命周期。 */
+    public void releaseAllTickets() {
+        for (Slot slot : slots.values()) {
+            dropChunkTickets(slot);
         }
     }
 
@@ -596,6 +691,8 @@ public final class Instances {
         int next = room.waveIndex + 1;
         if (next < room.waves.size()) {
             room.wavePending = true;
+            room.pendingWave = next;
+            room.emptySince = System.currentTimeMillis();
             Dungeon dungeon = slot.dungeon;
             announceWave(slot, room, next, true);
             Bukkit.getScheduler().runTaskLater(plugin, () -> {
@@ -608,12 +705,59 @@ public final class Instances {
             }, WAVE_DELAY_TICKS);
             return;
         }
+        // 最后一波也清完了。1.4.13：首领房必须"确认击杀首领"才算通关 ——
+        // 以前是"名单空了就算通关"，而活着的首领只要一时查不到（区块卸载）就会被当成死了，
+        // 于是出现"首领还在却已经结算"。
+        if (room.bossRoom && !room.bossKilled && ensureBossAlive(slot, room)) {
+            return;
+        }
+        completeRoom(slot, room);
+    }
+
+    /** 这一间真的完成了：发奖励、清场广播，首领房额外弹结算界面。 */
+    private void completeRoom(Slot slot, Dungeon.Room room) {
+        if (room.cleared) {
+            return;
+        }
         room.cleared = true;
+        room.emptySince = 0;
         grantRewards(slot, room);
         announceCleared(slot, room);
         if (room.bossRoom) {
             showSummary(slot);
         }
+    }
+
+    /**
+     * 首领房保险：没确认击杀首领就不许通关。
+     *
+     * <p>返回 true = 首领"已经回来了"（把还在的原实体找回名单，或原地补刷一只），房间继续等它被打死；
+     * 返回 false = 补刷次数用尽或压根刷不出来，调用方按通关处理（宁可放行，也别把玩家永久卡在这一间）。
+     */
+    private boolean ensureBossAlive(Slot slot, Dungeon.Room room) {
+        if (room.bossId != null) {
+            Entity existing = Bukkit.getEntity(room.bossId);
+            if (existing instanceof LivingEntity living && !living.isDead() && living.isValid()) {
+                if (!room.mobs.contains(room.bossId)) {
+                    room.mobs.add(room.bossId);
+                    room.lastSeen.put(room.bossId, living.getLocation());
+                    room.missingSeconds.remove(room.bossId);
+                    plugin.getLogger().warning("首领房：首领其实还活着（被误剔出名单），已重新纳入追踪");
+                }
+                return true;
+            }
+        }
+        Tier tier = plugin.tier(slot.tier);
+        if (room.center == null || tier == null || room.bossRespawns >= MAX_BOSS_RESPAWNS) {
+            plugin.getLogger().warning("首领房：首领找不回、也补刷不了（已补 " + room.bossRespawns
+                    + " 次），这一间按通关处理");
+            return false;
+        }
+        room.bossRespawns++;
+        DungeonBuilder.spawnBoss(world, room, tier);
+        plugin.getLogger().warning("首领房：首领不见了，已在房间中央补刷第 " + room.bossRespawns + " 只");
+        refreshBar(slot);
+        return true;
     }
 
     /** 波次提示：3 秒预告 / 新一波登场（标题 + 音效）。 */
@@ -784,7 +928,11 @@ public final class Instances {
         }
         room.waveIndex = waveIndex;
         room.wavePending = false;
+        room.pendingWave = -1;
+        room.emptySince = 0;
         room.mobs.clear();
+        room.lastSeen.clear();
+        room.missingSeconds.clear();
         for (Dungeon.TemplateSpawn spawn : room.plan.get(waveIndex)) {
             MobTemplate mobTemplate = spawn.mob() == null ? null : plugin.mobTemplate(spawn.mob());
             Entity entity = world.spawnEntity(spawn.point(),
@@ -798,6 +946,7 @@ public final class Instances {
                 plugin.tagMob(living, mobTemplate.id());
             }
             room.mobs.add(entity.getUniqueId());
+            room.lastSeen.put(entity.getUniqueId(), spawn.point().clone());
         }
         room.initialMobs = room.mobs.size();
     }
@@ -866,6 +1015,7 @@ public final class Instances {
                 room.initialMobs = room.mobs.size();
             }
             refreshBar(slot);
+            applyChunkTickets(slot);
             return slot;
         }
         return null;
@@ -964,28 +1114,100 @@ public final class Instances {
      * 兜底：怪物没留下死亡事件就消失了（被别的插件清掉、掉出世界等），
      * 把名单里已经不存在的实体剔掉；整间都空了就按清场处理，
      * 免得血条永远挂着"剩余 N 只"。
+     *
+     * <p><b>1.4.13 的两处加固</b>（这两条正是"活着的首领被判成已通关"的根源）：
+     * <ol>
+     *   <li>判断"查不到"时看的是**这只怪自己最后出现的位置**所在区块加载了没有，
+     *       不再只看房间中心 —— 怪跑远了、房间中心还加载着，以前就会被误判成"已消失"；</li>
+     *   <li>要连续 {@value #MISSING_SECONDS_BEFORE_DROP} 秒都查不到才剔除（以前是一秒一次直接删），
+     *       瞬时抖动不会再把活怪误杀；剔除时打日志，含坐标，方便事后追溯。</li>
+     * </ol>
      */
     private void pruneVanishedMobs(Slot slot) {
         if (slot.dungeon == null) {
             return;
         }
         for (Dungeon.Room room : slot.dungeon.rooms) {
-            if (room.cleared || room.mobs.isEmpty() || room.center == null) {
+            if (room.cleared || room.mobs.isEmpty()) {
                 continue;
-            }
-            if (!room.center.getWorld().isChunkLoaded(
-                    room.center.getBlockX() >> 4, room.center.getBlockZ() >> 4)) {
-                continue;   // 区块没加载时查不到实体，先别动名单
             }
             boolean changed = false;
             for (Iterator<UUID> it = room.mobs.iterator(); it.hasNext(); ) {
-                Entity entity = Bukkit.getEntity(it.next());
-                if (entity == null || entity.isDead() || !entity.isValid()) {
-                    it.remove();
-                    changed = true;
+                UUID uuid = it.next();
+                Entity entity = Bukkit.getEntity(uuid);
+                if (entity != null && !entity.isDead() && entity.isValid()) {
+                    // 还活着：刷新"最后已知位置"，并把失踪计数清零
+                    room.lastSeen.put(uuid, entity.getLocation());
+                    room.missingSeconds.remove(uuid);
+                    continue;
                 }
+                Location seen = room.lastSeen.get(uuid);
+                if (seen != null && seen.getWorld() != null
+                        && !seen.getWorld().isChunkLoaded(seen.getBlockX() >> 4, seen.getBlockZ() >> 4)) {
+                    // 它最后一次出现的地方区块没加载 —— 查不到很正常，别动名单
+                    room.missingSeconds.remove(uuid);
+                    continue;
+                }
+                int missing = room.missingSeconds.merge(uuid, 1, Integer::sum);
+                if (missing < MISSING_SECONDS_BEFORE_DROP) {
+                    continue;   // 再给它几秒：可能只是瞬时查不到
+                }
+                plugin.getLogger().warning("第 " + room.displayIndex + " 间有怪连续 "
+                        + missing + " 秒查不到且区块是加载的，按已消失处理（最后位置 "
+                        + (seen == null ? "未知"
+                                : (seen.getBlockX() + "," + seen.getBlockY() + "," + seen.getBlockZ()))
+                        + "）");
+                it.remove();
+                room.missingSeconds.remove(uuid);
+                room.lastSeen.remove(uuid);
+                changed = true;
             }
             if (changed && room.mobs.isEmpty() && !room.wavePending && !room.cleared) {
+                advanceWave(slot, room);
+            }
+        }
+    }
+
+    /**
+     * 卡死兜底（1.4.13）：名单空着却没推进、或"下一波"迟迟没刷出来，
+     * 说明推进链路某一环断了（刷怪任务异常、提前 return 等）。超时后强制推进，
+     * 避免整间永远清不掉、玩家再也拿不到结算。
+     */
+    private void guardStuckRooms(Slot slot) {
+        if (slot.dungeon == null) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        for (Dungeon.Room room : slot.dungeon.rooms) {
+            if (room.index == 0 || room.cleared) {
+                continue;
+            }
+            if (room.wavePending) {
+                if (room.emptySince == 0) {
+                    room.emptySince = now;
+                    continue;
+                }
+                if (now - room.emptySince > STUCK_WAVE_MS && room.pendingWave >= 0) {
+                    int pending = room.pendingWave;
+                    plugin.getLogger().warning("第 " + room.displayIndex + " 间的第 " + (pending + 1)
+                            + " 波迟迟没刷出来，强制重刷一次");
+                    room.wavePending = false;
+                    room.pendingWave = -1;
+                    room.emptySince = now;
+                    spawnWave(slot, room, pending);
+                }
+                continue;
+            }
+            if (!room.mobs.isEmpty()) {
+                room.emptySince = 0;
+                continue;
+            }
+            if (room.emptySince == 0) {
+                room.emptySince = now;
+            } else if (now - room.emptySince > STUCK_ROOM_MS) {
+                plugin.getLogger().warning("第 " + room.displayIndex + " 间的怪名单空了 "
+                        + ((now - room.emptySince) / 1000) + " 秒仍没推进，强制推进");
+                room.emptySince = now;
                 advanceWave(slot, room);
             }
         }
@@ -1004,6 +1226,12 @@ public final class Instances {
                 if (room.mobs.remove(entity.getUniqueId())) {
                     room.kills++;
                     slot.kills++;
+                    room.missingSeconds.remove(entity.getUniqueId());
+                    room.lastSeen.remove(entity.getUniqueId());
+                    // 首领"确认击杀"（收到死亡事件）才允许通关 —— 1.4.13
+                    if (room.bossId != null && room.bossId.equals(entity.getUniqueId())) {
+                        room.bossKilled = true;
+                    }
                     if (room.mobs.isEmpty() && !room.wavePending && !room.cleared) {
                         advanceWave(slot, room);
                     }
@@ -1097,6 +1325,7 @@ public final class Instances {
         slot.checkpointOf.clear();
         slot.modeOf.clear();
         slot.offlineSince.clear();
+        dropChunkTickets(slot);
         slot.dungeon = null;
         slot.busy = false;
     }
@@ -1229,6 +1458,7 @@ public final class Instances {
                 }
             }
             pruneVanishedMobs(slot);
+            guardStuckRooms(slot);
             enforceGates(slot);
             checkExitPlate(slot);
             refreshBar(slot);

@@ -163,6 +163,10 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
             cast.bar.removeAll();
         }
         casts.clear();
+        // 撤掉给进行中的副本挂的区块票据，别把区块钉到下一个生命周期（1.4.13）
+        if (instances != null) {
+            instances.releaseAllTickets();
+        }
     }
 
     // ------------------------------------------------------------ 怪物模板

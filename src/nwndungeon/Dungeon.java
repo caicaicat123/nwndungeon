@@ -4,7 +4,9 @@ import org.bukkit.Location;
 import org.bukkit.entity.EntityType;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /** 一次副本实例的运行时结构：房间、波次、怪物、门与箱子位置。 */
@@ -35,6 +37,20 @@ public final class Dungeon {
         public int kills;                 // 这间一共打死多少只（结算用）
         public int initialMobs;           // 本波刷新时的数量（血条进度用）
         public double initialBossHealth = 60;
+
+        // ---- 怪物"还在不在"的判定用（1.4.13）----
+        /** 每只怪最后一次被看到的位置：判断"查不到"是因为区块没加载，还是真的没了。 */
+        public final Map<UUID, Location> lastSeen = new HashMap<>();
+        /** 连续多少秒在"已加载的区块里"查不到这只怪（累计到阈值才剔除，防瞬时抖动误杀）。 */
+        public final Map<UUID, Integer> missingSeconds = new HashMap<>();
+        /** 首领是否被**确认击杀**（收到过死亡事件）—— 不能用"名单空了"代替。 */
+        public boolean bossKilled;
+        /** 首领补刷次数（上限兜底，防止无限补刷）。 */
+        public int bossRespawns;
+        /** 名单空着（或等下一波）的起始时间，用于卡死兜底。 */
+        public long emptySince;
+        /** 正在等刷的那一波序号（-1 = 没在等），任务没跑成时用它重刷。 */
+        public int pendingWave = -1;
 
         public Room(int index) {
             this.index = index;
