@@ -1,18 +1,37 @@
 name: NWNDungeon
-version: 1.4.13
+version: 1.5.0-M6
 main: nwndungeon.NWNDungeon
 api-version: '1.21'
 softdepend: [PlaceholderAPI]
-description: 随机副本入口与独立副本世界。按难度生成遗迹入口；房间编号从第一间有怪的房间算起。
+description: 随机副本入口与独立副本世界；1.5.0 起支持管理员自建副本（一局一个独立世界）。
 author: 新世界网络
 commands:
+  # 一个根命令，三个名字都能用：/dungeon = /nwd = /nwmdungeon
+  # 内置副本那套（spawn/test/list/tp/release/stamina/locate/leave）和
+  # 自建副本那套（edit/new/delete/test/spawn/end/doctor）合在同一个命令树下，
+  # 按子命令名分发（test/spawn/list 这些两边都有的，按参数判断走哪边）。
   dungeon:
-    description: 副本管理指令
-    usage: /dungeon <spawn|test|leave|list|tp|release|reload>
+    description: 副本管理 + 自建副本创作工具
+    usage: /nwd <edit|new|list|test|spawn|end|doctor|delete|reload|help|...>
+    aliases: [nwd, nwmdungeon]
 permissions:
-  nwndungeon.admin:
+  # 权限节点统一按 nwd.* 给；老的 nwndungeon.* 同样声明、代码里两边都认，
+  # 这样已经发给玩家的权限组不用改也能继续用。
+  nwd.admin:
     description: 生成入口、重载配置、查看槽位
     default: op
-  nwndungeon.use:
+  nwd.use:
     description: 使用副本入口
     default: true
+  nwd.dev:
+    description: 自建副本创作工具（面板、模板世界、测试开局）
+    default: op
+  nwndungeon.admin:
+    description: （旧名，等价于 nwd.admin）
+    default: op
+  nwndungeon.use:
+    description: （旧名，等价于 nwd.use）
+    default: true
+  nwndungeon.dev:
+    description: （旧名，等价于 nwd.dev）
+    default: op

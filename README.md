@@ -40,6 +40,19 @@
 | `/dungeon tp <槽位>` | `nwndungeon.admin` | 传送到指定槽位 |
 | `/dungeon release <槽位\|all>` | `nwndungeon.admin` | 手动回收槽位（里面的玩家会被送回入口） |
 | `/dungeon reload` | `nwndungeon.admin` | 重载配置 |
+| `/dungeon help [页码\|子命令]` | 所有人 | 看帮助（文本由命令登记表生成，含用法/参数/权限/示例/易错点） |
+| `/nwmdungeon edit` | `nwndungeon.dev` | **打开自建副本编辑器面板**（箱子 GUI，见下） |
+| `/nwmdungeon new world create <名字> [void\|flat\|normal]` | `nwndungeon.dev` | 新建一个模板世界并进入编辑态 |
+| `/nwmdungeon new world save` | `nwndungeon.dev` | 保存模板（等价于面板里的「保存」） |
+| `/nwmdungeon list` | `nwndungeon.dev` | 列出所有自建副本 |
+| `/nwmdungeon delete <名字>` | `nwndungeon.dev` | 删除自建副本（模板挪进 `templates/_deleted/`） |
+| `/nwmdungeon test <名字>` | `nwndungeon.dev` | 立刻开一局自测 |
+| `/nwmdungeon end [名字]` | `nwndungeon.dev` | 结束正在跑的自建副本 |
+| `/nwmdungeon spawn <名字>` | `nwndungeon.dev` | 在你面前贴一座自建副本的入口（门与触发点顺手登记好） |
+| `/nwmdungeon new entrance create <副本名字>` | `nwndungeon.dev` | 进虚空搭建世界搭一座门楼当入口 |
+| `/nwmdungeon new door` / `new trigger` | `nwndungeon.dev` | 搭入口时登记门 / 触发点（**看着那个方块**执行） |
+| `/nwmdungeon doctor` | `nwndungeon.dev` | 自检四件事：复制世界 / 标记机制 / 结构读写 / **入口登记（PDC）**（控制台也能跑） |
+| `/nwmdungeon reload` | `nwndungeon.dev` | 重载 `dungeons.yml` / `registry.yml` |
 
 ## 权限节点
 
@@ -47,6 +60,7 @@
 | --- | --- | --- |
 | `nwndungeon.use` | `true`（所有人） | 用副本入口：按下门旁按钮时会被一起带进副本；`/dungeon leave` 也需要它 |
 | `nwndungeon.admin` | `op` | 管理指令：`/dungeon spawn`、`test`、`list`、`tp`、`release`、`reload`；**并且在副本里不受「只能用 /dungeon」这条限制** |
+| `nwndungeon.dev` | `op` | 自建副本创作工具：`/nwmdungeon …`（面板、模板世界、测试开局）；同样不受副本内命令限制 |
 
 ## PlaceholderAPI 占位符
 
@@ -63,38 +77,140 @@
 | `%nwndungeon_cost_iron%` / `_gold` / `_diamond` | 各难度进本消耗的体力 |
 | `%nwndungeon_money_iron%` / `_gold` / `_diamond` | 各难度通关发放的金币 |
 
-## 开发者：自建副本模板（`/dungeon edit`）
+## 自建副本（`/nwmdungeon`，1.5.0 起）
 
-> 注意：这套编辑器属于 **1.5.0 分支**，当前 1.4.x 版本里默认关闭（`EDITOR_ENABLED = false`），命令只会提示「开发中」。
+> 状态：**1.5.0-M6 预览**（已在本地 Purpur 26.1.2 测试服跑通 `/nwd doctor` 四段自检）。从"搭副本 + 搭入口"到"打完收掉"整套是通的：
+> 建模板 → 点图标标完标记 → 保存 → 搭一座门楼存成入口 → 贴到主世界 → 按按钮进本 →
+> 按关卡分波刷怪 → 清完开门 → 首领确认死亡 → 结算 → 卸载删掉。
 
-不用改代码，直接在游戏里搭副本：
+跟内置副本（iron/gold/diamond，代码程序化生成房间链）**并存**：内置副本照旧，
+自建副本是"你搭一座世界，每次开本复制一份给这队人打"。
+
+### 怎么用
 
 ```
-/dungeon edit new <名字>       # 进编辑世界（nwndungeon_edit）的专属空地，创造模式；同名会把旧结构贴回来继续改
-/dungeon edit pos1 / pos2      # 站到两个对角，框住整份副本
-/dungeon edit spawn            # 进本落点（脚下）
-/dungeon edit checkpoint       # 检查点（可以多个）
-/dungeon edit room <n>         # 切到第 n 间（之后的刷怪点算这一间）
-/dungeon edit wave <n>         # 切到第 n 波（清完一波隔 3 秒刷下一波）
-/dungeon edit mob <模板名>      # 之后放的刷怪点用哪个怪物（mobs.yml 里的；clear = 默认僵尸）
-/dungeon edit spawnpoint       # 在脚下加一个刷怪点
-/dungeon edit gate             # 看着一扇铁门，登记成"这一间清完就开的那扇门"
-/dungeon edit chest            # 看着箱子，登记成这一间的奖励箱位置
-/dungeon edit exit             # 通关后出现的离开压力板（踩上去出本）
-/dungeon edit info             # 看已经记了什么
-/dungeon edit save             # 保存成模板（templates/<名字>.nbt + .yml）
-/dungeon edit test <名字>       # 立刻贴一份自己进去跑
+/nwmdungeon edit                      # 打开面板：列表页（新建 / 进编辑 / 右键删除）
+/nwmdungeon edit → 新建副本 → 聊天里打名字   # 建空世界、把你拉进去、创造+飞行
+（在虚空世界里搭副本；面板里点「落点」记下落点）
+/nwmdungeon edit → 保存                # 落盘 → 卸载 → 搬成模板（旧模板自动备份）
+/nwmdungeon test <名字>                # 复制一份开一局，自己进去跑
+/nwmdungeon end                       # 结束这一局（卸载并删掉临时世界）
 ```
 
-自定义怪物写 `plugins/NWNDungeon/mobs.yml`（种类 / 名字 / 血量 / 攻击力 / 移速 / 装备 + 附魔 / 掉不掉装备 / 额外掉落），
-刷怪点用 `mob: <模板名>` 引用；**不需要 MythicMobs**。模板副本和现有的随机副本并存，互不影响。
+全程**点图标，不用打字**；需要"指某个方块"的动作（关卡门 / 出口门 / 奖励箱）改成
+**先用准星看着它、再点对应图标** —— 你放的是什么门就存什么门，命令里不写材质参数。
+
+### 标记都有哪些（M3）
+
+| 标记 | 怎么打 | 说明 |
+| --- | --- | --- |
+| 落点 | 站好点「落点」 | 没标就用世界出生点 |
+| 关卡门 | **看着一扇门**点「关卡门」 | 结束当前关、开启下一关；**关卡数 = 门数 + 1**，最后一关是首领区；未清场时插件不许玩家推开它 |
+| 出口门 | **看着一扇门**点「出口门」 | 通关后右键它离开 |
+| 首领位 | 站好点「首领位」 | 属性写在 `dungeons.yml` 的 `boss:` |
+| 刷怪点 | ◀▶ 选关卡与波次，站好点「刷怪点」 | 刷什么怪写 `stages[].waves`；同一坐标重复标 = 覆盖 |
+| 检查点 | 站好点「检查点」 | 记下脚下 3×3 的**方块签名**；方块被拆 → 该检查点失效（补回原样即恢复） |
+| 补给箱 / 奖励箱 | **看着箱子**点图标 → 弹出的箱子里放东西 | 关掉界面就写进 `loot.yml`；权重/概率在 yml 里调 |
+
+面板上还有：**标记清单**（逐条列出）、**校验**（挑出没标齐 / 失效的）、**撤销**、**清空**、
+**显示标记**（用粒子把标过的位置标出来）、**传送**到落点/首领位。
+斜杠版本一应俱全：`new start / checkpoint / spawner <波次> / gate / exit / boss / reward / stage / wave / undo / list`。
+
+`/nwmdungeon doctor` 是自检，**四段都不需要玩家在线**：
+① 复制世界这条路（建世界 → 埋金块 → 保存 → 复制成新世界名 → 建世界 → 查金块 → 全删掉）；
+② 标记机制（检查点签名"拆一块就失效、补回去就恢复"、门的上下半格取法）；
+③ 结构读写保真度（抓取带箱子内容的场地 → 存 .nbt → 读回来 → 贴到别处 → 核对金块/门朝向/箱子内容）；
+④ 入口登记（放一扇木门 + 按钮 → 写进区块 PDC → 从门查 → **从开关反查** → 打掉门作废）。
+最后还会打印"自然生成抽签池"，告诉你为什么某个入口不生成。
+
+### 入口建筑（自己搭一座门楼）
+
+```
+/nwmdungeon new entrance create <副本名字>   # 进虚空搭建世界（脚下有落脚台）
+（搭一座门楼：一扇门 + 门旁一个按钮/压力板/拉杆）
+/nwmdungeon new door      # 看着那扇门        —— 你放的是什么门就存什么门（木门/铜门/铁门都行）
+/nwmdungeon new trigger   # 看着按钮/压力板/拉杆
+/nwmdungeon new entrance save                 # 自动框出建筑范围 → 存成结构
+/nwmdungeon spawn <副本名字>                  # 在你面前贴一座出来（门与触发器顺手登记好）
+```
+
+面板上是同一套（列表页点「新建入口建筑」→ 入口页点「入口门」「触发点」「保存入口」）。
+入口结构存在 `templates/entrances/<slug>.nbt` + `.yml`，里面**显式记着"哪一格是门、哪一格是开关"
+以及门到底是什么材质** —— 所以不再像老实现那样只认"铁门 + 石头按钮"。
+
+自建入口也能参与自然生成：副本配置里的 `entrance.random-generation: true`（开）+ `weight`（权重）
++ `worlds`（允许在哪些世界）；新区块抽签时，它与内置难度**共用一个权重池**。
+关掉 random-generation 就不会自然出现，但 `/nwmdungeon spawn` 仍然能贴。
+### 阵容与首领写在哪
+
+`dungeons.yml`（每个副本一段；`markers` 由面板维护，**`stages` / `boss` 是给手写的、插件只读不写**）：
+
+```yaml
+dungeons:
+  熔岩要塞:
+    display: '§6熔岩要塞'
+    time-limit-minutes: 20
+    stamina-cost: 25
+    money-reward: 1000
+    max-concurrent-runs: 8
+    stages:
+      - name: 第一间
+        waves: ['ZOMBIE:3', 'ZOMBIE:2,SKELETON:2']   # 每项 = 一波
+      - name: 第二间
+        waves: ['LAVA_BRUTE:3']                      # 也可以写 mobs.yml 里的模板名
+    boss:
+      type: WITHER_SKELETON
+      name: '§c熔岩领主'
+      health: 160
+      waves: ['WITHER_SKELETON:2']                   # 首领登场前的小怪波
+      guards: 'CREEPER:3'                            # 随首领一起登场的护卫
+```
+
+关数 = 关卡门数 + 1（最后那关是首领区）：第 i 关用 `stages[i]` 的阵容，
+刷怪点用面板里"第 i 关"下标的那一批。**没配 `waves` 的一关会按刷怪点数量刷默认僵尸**，
+面板的「校验」会提醒你。奖励内容在 `loot.yml` 的 `dungeons.<副本名>.supply-chest / reward-chest`
+（由奖励箱界面写入，权重/概率在那里调）。
+
+### 文件与目录
+
+```
+plugins/NWNDungeon/
+  dungeons.yml          # 每个副本一段：显示名 / 生成器 / 时限 / 体力 / 金币 / 并发上限 / 标记
+  registry.yml          # 副本名 ↔ 世界名（slug）对照表（中文名不能当世界名，见下）
+  templates/
+    worlds/<slug>/      # 模板 = 一个【维度文件夹】的副本（不是"整个世界"）
+    _backup/            # 每次保存前的上一版
+    _deleted/           # 删掉的模板挪到这里（不硬删）
+    _recovered/         # 崩溃/重启时没保存完的编辑世界挪到这里（不硬删）
+  pending-delete.txt    # 删不掉的临时世界，下次启动再试
+服务器根目录/
+  world/dimensions/minecraft/nwndtpl_<slug>/       # 编辑中的模板世界（保存时搬回 templates/）
+  world/dimensions/minecraft/nwndinst_<slug>_<n>/  # 每局临时世界（结束就卸载并删除）
+```
+
+### 几个必须知道的点
+
+- **世界名必须是小写 ASCII**：这个版本的世界名会被当成维度键（`paper-world.yml` 里写
+  `World: minecraft:<名字>`），只允许 `[a-z0-9._-]`。所以中文副本名只用于显示，
+  磁盘上由插件生成 slug 并记在 `registry.yml`。
+- **模板平时不是"世界"**，只是 `plugins/` 下的一份文件夹（不占内存、不 tick）；
+  只有编辑与开本时才复制进 `world/dimensions/minecraft/` 真的加载。
+- **一局的代价很小**：复制的是**一个维度文件夹**（几十个文件、通常不到 1 MB）。
+  真正要管的是**同时加载几个世界**（内存与 tick）→ 看 `max-concurrent-runs`。
+- **一次只能一个人编辑同一个副本**；不同副本可以各改各的。
 
 LuckPerms 用法：
 
 ```
 /lp group default permission set nwndungeon.use true
 /lp group helper  permission set nwndungeon.admin true
+/lp group builder permission set nwndungeon.dev true      # 能搭自建副本的人
 ```
+
+## 老编辑器（`/dungeon edit`）已退役
+
+1.5.0 起 `/dungeon edit`、`/dungeon template` 会提示改用 `/nwmdungeon edit`。
+`Template` / `TemplateEditor` 的代码暂时留着（M5 做入口建筑时要抽里面的结构读写工具）。
 
 ## 掉落表（`loot.yml`）
 

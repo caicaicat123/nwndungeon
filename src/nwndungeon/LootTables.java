@@ -8,10 +8,12 @@ import org.bukkit.plugin.java.JavaPlugin;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 /** loot.yml：按难度分开写的掉落表（不动 config.yml 也能改奖励）。 */
 public final class LootTables {
@@ -27,6 +29,13 @@ public final class LootTables {
     /** 每个副本的随机附魔池（存名字，生成物品时才去注册表解析）。 */
     private final Map<String, List<String>> enchantPools = new HashMap<>();
     private final Map<String, int[]> enchantLevels = new HashMap<>();
+    /**
+     * 配置里**真的存在**的键（{@code <段名>:supply-chest} 这种）。
+     *
+     * <p>为什么要记：{@link #parse} 对空列表会兜底成"一块面包"，所以"没配"和"配了但空"
+     * 光看解析结果分不出来 —— 编辑器里回读奖励箱内容、M4 决定要不要放箱子都得知道原始情况。
+     */
+    private final Set<String> configuredKeys = new HashSet<>();
 
     public static LootTables load(JavaPlugin plugin) {
         LootTables tables = new LootTables();
@@ -54,6 +63,12 @@ public final class LootTables {
             String key = id.toLowerCase(Locale.ROOT);
             tables.supply.put(key, parse(section.getList("supply-chest")));
             tables.reward.put(key, parse(section.getList("reward-chest")));
+            if (section.isSet("supply-chest")) {
+                tables.configuredKeys.add(key + ":supply-chest");
+            }
+            if (section.isSet("reward-chest")) {
+                tables.configuredKeys.add(key + ":reward-chest");
+            }
             tables.enchantPools.put(key, names(section.getList("enchant-pool")));
             tables.enchantLevels.put(key, levelRange(section.getList("enchant-levels")));
         }
@@ -64,6 +79,12 @@ public final class LootTables {
     public boolean has(String tierId) {
         String key = tierId == null ? "" : tierId.toLowerCase(Locale.ROOT);
         return supply.containsKey(key) || reward.containsKey(key);
+    }
+
+    /** 配置里是不是真的写了这一栏（{@code supply-chest} / {@code reward-chest}）。 */
+    public boolean configured(String dungeonId, String field) {
+        String key = dungeonId == null ? "" : dungeonId.toLowerCase(Locale.ROOT);
+        return configuredKeys.contains(key + ":" + field);
     }
 
     public List<LootEntry> supply(String tierId) {

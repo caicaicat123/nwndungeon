@@ -484,188 +484,27 @@ public final class Instances {
         if (pool.isEmpty()) {
             return;
         }
+        // D6：这一段配置里要是压根没写补给箱那一栏，就别放箱子 ——
+        // 否则 LootTables 的空池兜底会变成"每关固定塞一块面包"（那个兜底是给内置副本用的）。
+        if (!plugin.lootTables().configured(tierId, "supply-chest")) {
+            return;
+        }
         placeChest(location, rollLoot(pool, maxTypes, rich, tierId));
     }
 
     /** 先放箱子，下一 tick 再写内容（新放下的方块实体要等一 tick 才稳定）。 */
     private void placeChest(Location location, Map<Integer, ItemStack> loot) {
         location.getBlock().setType(Material.CHEST, false);
-        Bukkit.getScheduler().runTask(plugin, () -> writeChest(location, loot));
+        Bukkit.getScheduler().runTask(plugin, () -> LootRoller.writeChest(location, loot, plugin));
     }
 
     /**
-     * 抽奖励：随机格子 + 按权重抽物品 + 每件物品自己的数量区间（单箱 27 格）。
-     * 先按 chance 筛出本次候选（chance=1 的一直在池里），再按 weight 加权抽取。
+     * 抽奖励：**实现搬到了 {@link LootRoller}**，这里只保留一个转发入口
+     * （1.5.0 之前这段逻辑在本类里，自建副本又抄了一份；M6 把两份合成一份，
+     * 内置副本这条路的抽奖结果不变 —— 逐行对比过，只是换了执行位置）。
      */
     private Map<Integer, ItemStack> rollLoot(List<LootEntry> pool, int maxTypes, boolean rich, String tierId) {
-        int types = rich ? maxTypes : 1 + random.nextInt(Math.min(3, maxTypes));
-        Map<Integer, ItemStack> loot = new LinkedHashMap<>();
-        if (pool.isEmpty()) {
-            return loot;
-        }
-        List<LootEntry> candidates = new ArrayList<>();
-        for (LootEntry entry : pool) {
-            if (entry.chance() >= 1.0 || random.nextDouble() < entry.chance()) {
-                candidates.add(entry);
-            }
-        }
-        if (candidates.isEmpty()) {
-            candidates = pool;
-        }
-        int totalWeight = 0;
-        for (LootEntry entry : candidates) {
-            totalWeight += entry.weight();
-        }
-        while (loot.size() < types && loot.size() < 27) {
-            int slot = random.nextInt(27);
-            if (loot.containsKey(slot)) {
-                continue;
-            }
-            LootEntry picked = pick(candidates, totalWeight);
-            int min = picked.min() > 0 ? picked.min() : 1;
-            int max = picked.max() > 0 ? picked.max() : (rich ? 4 : 2);
-            if (max < min) {
-                max = min;
-            }
-            int amount = min + random.nextInt(max - min + 1);
-            ItemStack stack = new ItemStack(picked.material(), Math.max(1, amount));
-            applyEnchants(stack, picked, tierId);
-            loot.put(slot, stack);
-        }
-        return loot;
-    }
-
-    // ---------------------------------------------------------------- 掉落物的附魔
-
-    /** 附魔名 → Enchantment 的缓存；值为 null 表示这个名字不认识（缓存下来别反复查）。 */
-    private final Map<String, Enchantment> enchantCache = new HashMap<>();
-    private final Set<String> unknownEnchantWarned = new HashSet<>();
-
-    /** 按名字取附魔；名字不认识时只警告一次，方便在日志里发现写错，又不会刷屏。 */
-    private Enchantment enchant(String name) {
-        if (name == null || name.isBlank()) {
-            return null;
-        }
-        String key = name.toLowerCase(Locale.ROOT);
-        if (enchantCache.containsKey(key)) {
-            return enchantCache.get(key);
-        }
-        Enchantment found = Registry.ENCHANTMENT.get(NamespacedKey.minecraft(key));
-        if (found == null && unknownEnchantWarned.add(key)) {
-            plugin.getLogger().warning("loot.yml 里有不认识的附魔名：" + name
-                    + "（已跳过；要用原版附魔 ID，例如 SHARPNESS / PROTECTION / MENDING）");
-        }
-        enchantCache.put(key, found);
-        return found;
-    }
-
-    /**
-     * 给一件掉落物上附魔。
-     *
-     * <p>配了 {@code enchants} 就完全按写死的来（等级不夹，写 6 就给 6）；否则配了
-     * {@code random-enchants}、或者这是"一条附魔都没有的附魔书"，就按该副本的
-     * {@code enchant-pool} / {@code enchant-levels} 随机抽，随机出来的等级按原版上限夹一下。
-     *
-     * <p>附魔书写进 {@link EnchantmentStorageMeta}（存储附魔）—— 普通附魔挂在书上铁砧读不到。
-     */
-    private void applyEnchants(ItemStack stack, LootEntry entry, String tierId) {
-        if (entry.hasEnchants()) {
-            entry.enchants().forEach((name, level) -> {
-                Enchantment enchantment = enchant(name);
-                if (enchantment != null) {
-                    addEnchant(stack, enchantment, Math.max(1, level), false);
-                }
-            });
-            return;
-        }
-        if (!entry.wantsRandomEnchants() && !entry.isBlankEnchantedBook()) {
-            return;
-        }
-        List<String> pool = plugin.lootTables().enchantPool(tierId);
-        if (pool.isEmpty()) {
-            return;
-        }
-        int[] levels = plugin.lootTables().enchantLevelRange(tierId);
-        int min = entry.wantsRandomEnchants() ? Math.max(1, entry.randomEnchantMin()) : 1;
-        int max = entry.wantsRandomEnchants() ? Math.max(min, entry.randomEnchantMax()) : 2;
-        int count = min + random.nextInt(max - min + 1);
-        List<String> shuffled = new ArrayList<>(pool);
-        Collections.shuffle(shuffled, random);
-        Set<Enchantment> chosen = new HashSet<>();
-        for (String name : shuffled) {
-            if (count <= 0) {
-                break;
-            }
-            Enchantment enchantment = enchant(name);
-            if (enchantment == null || !chosen.add(enchantment)) {
-                continue;
-            }
-            int level = levels[0] + random.nextInt(Math.max(1, levels[1] - levels[0] + 1));
-            addEnchant(stack, enchantment, level, true);
-            count--;
-        }
-    }
-
-    /** 加一条附魔；clamp=true 时按原版上限夹一下等级（随机附魔用，别随机出离谱的东西）。 */
-    private static void addEnchant(ItemStack stack, Enchantment enchantment, int level, boolean clamp) {
-        int value = clamp ? Math.min(level, enchantment.getMaxLevel()) : level;
-        if (stack.getType() == Material.ENCHANTED_BOOK) {
-            if (stack.getItemMeta() instanceof EnchantmentStorageMeta meta) {
-                meta.addStoredEnchant(enchantment, value, true);
-                stack.setItemMeta(meta);
-            }
-            return;
-        }
-        stack.addUnsafeEnchantment(enchantment, value);
-    }
-
-    private LootEntry pick(List<LootEntry> candidates, int totalWeight) {
-        int roll = random.nextInt(Math.max(1, totalWeight));
-        for (LootEntry entry : candidates) {
-            roll -= entry.weight();
-            if (roll < 0) {
-                return entry;
-            }
-        }
-        return candidates.get(candidates.size() - 1);
-    }
-
-    /** 下一 tick 执行：先按实时容器写，写不进再退回快照写法，两条路都读回来确认。 */
-    private void writeChest(Location location, Map<Integer, ItemStack> loot) {
-        BlockState state = location.getBlock().getState(false);
-        if (!(state instanceof Chest chest)) {
-            plugin.getLogger().warning("箱子没放成，跳过一个：" + location.getBlockX()
-                    + "," + location.getBlockY() + "," + location.getBlockZ());
-            return;
-        }
-        Inventory inventory = chest.getInventory();
-        loot.forEach(inventory::setItem);
-        if (chestFilled(inventory)) {
-            return;
-        }
-        // 实时写入没生效：退回"快照 + update"的老写法，再等一 tick 试一次
-        Bukkit.getScheduler().runTask(plugin, () -> {
-            BlockState snapshot = location.getBlock().getState();
-            if (snapshot instanceof Chest snap) {
-                Inventory snapInventory = snap.getInventory();
-                loot.forEach(snapInventory::setItem);
-                snap.update(true, false);
-                if (chestFilled(snapInventory)) {
-                    return;
-                }
-            }
-            plugin.getLogger().warning("箱子写入后回读仍为空：" + location.getBlockX()
-                    + "," + location.getBlockY() + "," + location.getBlockZ());
-        });
-    }
-
-    private boolean chestFilled(Inventory inventory) {
-        for (ItemStack stack : inventory.getContents()) {
-            if (stack != null && stack.getType() != Material.AIR) {
-                return true;
-            }
-        }
-        return false;
+        return LootRoller.roll(random, pool, maxTypes, rich, tierId, plugin);
     }
 
     /** 清场广播：给副本里所有人发消息（击杀清场与兜底清场共用）。 */
@@ -699,7 +538,7 @@ public final class Instances {
                 if (!slot.busy || slot.dungeon != dungeon || room.cleared) {
                     return;   // 槽位已经回收或重开了，别再刷
                 }
-                spawnWave(slot, room, next);
+                DungeonBuilder.spawnWave(world, room, next, plugin.tier(slot.tier));
                 announceWave(slot, room, next, false);
                 refreshBar(slot);
             }, WAVE_DELAY_TICKS);
@@ -911,204 +750,16 @@ public final class Instances {
         return false;
     }
 
-    // ---------------------------------------------------------------- 模板副本
-
-    private java.io.File templatesFolder() {
-        return new java.io.File(plugin.getDataFolder(), "templates");
-    }
-
-    /** 刷一波怪：程序生成的副本用固定 9 个点位，模板副本用编辑时标记的刷怪点。 */
-    private void spawnWave(Slot slot, Dungeon.Room room, int waveIndex) {
-        if (room.plan.isEmpty()) {
-            DungeonBuilder.spawnWave(world, room, waveIndex, plugin.tier(slot.tier));
-            return;
-        }
-        if (waveIndex < 0 || waveIndex >= room.plan.size()) {
-            return;
-        }
-        room.waveIndex = waveIndex;
-        room.wavePending = false;
-        room.pendingWave = -1;
-        room.emptySince = 0;
-        room.mobs.clear();
-        room.lastSeen.clear();
-        room.missingSeconds.clear();
-        for (Dungeon.TemplateSpawn spawn : room.plan.get(waveIndex)) {
-            MobTemplate mobTemplate = spawn.mob() == null ? null : plugin.mobTemplate(spawn.mob());
-            Entity entity = world.spawnEntity(spawn.point(),
-                    mobTemplate != null ? mobTemplate.type() : EntityType.ZOMBIE);
-            if (entity == null) {
-                continue;
-            }
-            entity.setPersistent(true);
-            if (mobTemplate != null && entity instanceof LivingEntity living) {
-                mobTemplate.apply(living);
-                plugin.tagMob(living, mobTemplate.id());
-            }
-            room.mobs.add(entity.getUniqueId());
-            room.lastSeen.put(entity.getUniqueId(), spawn.point().clone());
-        }
-        room.initialMobs = room.mobs.size();
-    }
-
-    /** 用模板开一个副本实例（模板副本，和程序生成的随机副本并存）。 */
-    public Slot allocateTemplate(Template template, List<Player> party) {
-        if (!ready() || template == null) {
-            return null;
-        }
-        for (Slot slot : slots.values()) {
-            if (slot.busy) {
-                continue;
-            }
-            slot.busy = true;
-            slot.manualHold = false;
-            slot.tier = "template:" + template.name;
-            slot.entranceOf.clear();
-            slot.checkpointOf.clear();
-            slot.modeOf.clear();
-            slot.deaths.clear();
-            slot.kills = 0;
-            slot.lastReward = new ArrayList<>();
-            if (slot.lastPasteMin != null && slot.lastPasteMax != null) {
-                clearRegion(slot.lastPasteMin, slot.lastPasteMax);
-            } else {
-                clear(slot);
-            }
-            slot.lastPasteMin = null;
-            slot.lastPasteMax = null;
-            try {
-                org.bukkit.util.BlockVector size = template.paste(templatesFolder(), slot.origin);
-                slot.lastPasteMin = slot.origin.clone();
-                slot.lastPasteMax = slot.origin.clone()
-                        .add(size.getBlockX() - 1, size.getBlockY() - 1, size.getBlockZ() - 1);
-            } catch (Exception e) {
-                plugin.getLogger().warning("贴模板 " + template.name + " 失败：" + e.getMessage());
-            }
-            Dungeon dungeon = templateDungeon(template, slot.origin);
-            slot.dungeon = dungeon;
-            slot.spawn = dungeon.spawn;
-            slot.startedAt = System.currentTimeMillis();
-            slot.limitMinutes = Math.max(1, template.timeLimitMinutes);
-            slot.deadline = slot.startedAt + slot.limitMinutes * 60_000L;
-            if (slot.bar != null) {
-                slot.bar.removeAll();
-            }
-            BossBar bar = Bukkit.createBossBar("§5副本", BarColor.PURPLE, BarStyle.SEGMENTED_20);
-            slot.bar = bar;
-            for (Player player : party) {
-                slot.entranceOf.put(player.getUniqueId(), player.getLocation());
-                slot.checkpointOf.put(player.getUniqueId(), dungeon.spawn);
-                slot.modeOf.put(player.getUniqueId(), player.getGameMode());
-                bar.addPlayer(player);
-            }
-            // 每间只刷第一波；没有配怪的房间直接算清场（压力板会立刻补上）
-            for (Dungeon.Room room : dungeon.rooms) {
-                if (room.index == 0) {
-                    continue;
-                }
-                if (room.plan.isEmpty()) {
-                    room.cleared = true;
-                    grantRewards(slot, room);
-                    continue;
-                }
-                spawnWave(slot, room, 0);
-                room.initialMobs = room.mobs.size();
-            }
-            refreshBar(slot);
-            applyChunkTickets(slot);
-            return slot;
-        }
-        return null;
-    }
-
-    /** 模板数据 → 运行时结构（坐标从模板原点换算到槽位原点）。 */
-    private Dungeon templateDungeon(Template template, Location origin) {
-        Dungeon dungeon = new Dungeon();
-        dungeon.spawn = template.at(world, origin, template.spawn);
-
-        Dungeon.Room hall = new Dungeon.Room(0);
-        hall.cleared = true;
-        hall.origin = origin.clone();
-        hall.center = dungeon.spawn;
-        dungeon.rooms.add(hall);
-
-        int index = 1;
-        for (Template.Room def : template.rooms) {
-            Dungeon.Room room = new Dungeon.Room(index);
-            room.origin = origin.clone();
-            room.bossRoom = def.boss;
-            if (def.door != null) {
-                room.doorLower = template.at(world, origin, def.door);
-            }
-            if (def.plate != null) {
-                room.plateSpot = template.at(world, origin, def.plate);
-            }
-            if (def.chest != null) {
-                room.chestSpot = template.at(world, origin, def.chest);
-            }
-            for (List<Template.Spawn> wave : def.waves) {
-                List<Dungeon.TemplateSpawn> points = new ArrayList<>();
-                for (Template.Spawn spawn : wave) {
-                    points.add(new Dungeon.TemplateSpawn(template.at(world, origin, spawn.point()), spawn.mob()));
-                }
-                room.plan.add(points);
-            }
-            if (!room.plan.isEmpty() && !room.plan.get(0).isEmpty()) {
-                room.center = room.plan.get(0).get(0).point();
-            } else if (room.chestSpot != null) {
-                room.center = room.chestSpot;
-            } else {
-                room.center = origin.clone();
-            }
-            if (def.boss && template.exitPlate != null) {
-                room.exitPlate = template.at(world, origin, template.exitPlate);
-            }
-            dungeon.rooms.add(room);
-            index++;
-        }
-        for (Template.Point point : template.checkpoints) {
-            dungeon.checkpoints.add(template.at(world, origin, point));
-        }
-        int number = 0;
-        for (Dungeon.Room room : dungeon.rooms) {
-            if (!room.plan.isEmpty()) {
-                room.displayIndex = ++number;
-            }
-        }
-        return dungeon;
-    }
-
-    /** 模板副本：站到通关后出现的压力板上就离开副本。 */
-    private void checkExitPlate(Slot slot) {
-        if (slot.dungeon == null) {
-            return;
-        }
-        Dungeon.Room last = null;
-        for (Dungeon.Room room : slot.dungeon.rooms) {
-            if (room.exitPlate != null) {
-                last = room;
-            }
-        }
-        if (last == null || !last.cleared) {
-            return;
-        }
-        Location plate = last.exitPlate;
-        if (!world.isChunkLoaded(plate.getBlockX() >> 4, plate.getBlockZ() >> 4)) {
-            return;
-        }
-        if (!Tag.PRESSURE_PLATES.isTagged(plate.getBlock().getType())) {
-            return;
-        }
-        for (UUID uuid : new ArrayList<>(slot.entranceOf.keySet())) {
-            Player player = Bukkit.getPlayer(uuid);
-            if (player == null || !player.getWorld().equals(plate.getWorld())) {
-                continue;
-            }
-            if (player.getLocation().distanceSquared(plate) <= 1.5 * 1.5) {
-                leave(player, "你踩上压力板，从副本里走了出来。");
-            }
-        }
-    }
+    // ---------------------------------------------------------------- 老模板路线（已删除）
+    //
+    // 1.5.0 起自建副本走的是"复制整个世界"（见 DungeonRun / InstanceWorlds），老的那条
+    // "把 .nbt 结构贴进共享槽位"（allocateTemplate / templateDungeon / checkExitPlate / spawnWave(slot)）
+    // 已经没有任何调用方，整段删掉 —— 顺带消灭了计划书 §11.1 里的 D1~D5：
+    //   D1/D2 首领属性只认 Tier（模板副本 slot.tier = "template:x"，导致每次清首领房都刷警告、且没有首领）
+    //   D3    首领房见到 exitPlate 就 return，最终奖励箱从来没发过
+    //   D4    出口门只认 room.exitDoor，模板副本的 exitPlate 右键没反应
+    //   D5    enforceGates 会把管理员标定的固定坐标上的按钮/压力板每秒抠掉
+    // 骨架类 Template / TemplateEditor 暂时留着：M5 做入口建筑要抽里面的结构读写（Paper Structure API）。
 
     /**
      * 兜底：怪物没留下死亡事件就消失了（被别的插件清掉、掉出世界等），
@@ -1194,7 +845,7 @@ public final class Instances {
                     room.wavePending = false;
                     room.pendingWave = -1;
                     room.emptySince = now;
-                    spawnWave(slot, room, pending);
+                    DungeonBuilder.spawnWave(world, room, pending, plugin.tier(slot.tier));
                 }
                 continue;
             }
@@ -1460,7 +1111,6 @@ public final class Instances {
             pruneVanishedMobs(slot);
             guardStuckRooms(slot);
             enforceGates(slot);
-            checkExitPlate(slot);
             refreshBar(slot);
             if (slot.entranceOf.isEmpty()) {
                 if (slot.manualHold && completed(slot)) {
