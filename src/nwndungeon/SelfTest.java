@@ -6,6 +6,7 @@ import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.command.CommandSender;
+import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 
 import java.io.File;
@@ -203,6 +204,16 @@ public final class SelfTest {
 
         // 9. 入口登记（真 NBT 存储，不是纯字符串）：写进区块 PDC → 从门查 → 从开关反查 → 破坏作废
         allOk &= entranceChecks(report);
+
+        // 11. 死亡归属判定（"首领自己消失却被当成通关"那类问题的核心）
+        allOk &= killJudgmentChecks(report);
+
+        // 12. 区块票据（玩家走慢时远处的怪会不会被卸载）
+        allOk &= chunkTicketChecks(report);
+
+        // 13. 走进房间才开始刷怪（不要提前把几百格外的怪刷出来）
+        allOk &= lazySpawnChecks(report);
+        allOk &= spawnSafetyChecks(report);
 
         // 10. 自然生成池（只读诊断：告诉管理员"为什么我的入口不生成"）
         for (String text : plugin.describeGenerationPool()) {
@@ -547,6 +558,491 @@ public final class SelfTest {
             WorldStore.deleteFolder(world.getWorldFolder());
         }
         return allOk;
+    }
+
+    /**
+     * 死亡归属判定自检：**这只怪的死，算不算玩家打赢的？**
+     *
+     * <p>对应玩家报的「boss 自己消失，然后直接进结算」：以前任何死亡事件都被当成通关。
+     * 现在规则是"玩家打过它（30 秒内）才算"，所以这里验三件事：
+     * <ol>
+     *   <li>悬空处刷首领能不能自动找到 / 铺出落脚点（不让它一出来就掉出世界）；</li>
+     *   <li>**没有任何玩家碰过**的怪死了 → 不算玩家击杀（这就是修掉的那条 bug）；</li>
+     *   <li>有玩家打过、随后死于环境 → **仍算玩家击杀**（打进岩浆 / 打落虚空）。</li>
+     * </ol>
+     * 第 3 条需要一名在线玩家，没有就跳过并说明。
+     */
+    private boolean killJudgmentChecks(List<String> report) {
+        boolean allOk = true;
+        String worldName = Names.TEMPLATE_PREFIX + "zzselfkill";
+        cleanupQuietly(worldName);
+        World world = null;
+        try {
+            world = store.create(worldName, "void", false, false);
+        } catch (Throwable t) {
+            line(report, false, "", "判定自检建世界失败：" + t);
+        }
+        if (world == null) {
+            return line(report, false, "", "判定自检建不出世界");
+        }
+        try {
+            // ① M8 不再靠凭空铺石台掩盖错误坐标：先验证拒绝，再搭测试用地板。
+            Location air = new Location(world, MARK, Math.max(world.getMinHeight() + 20, 80), MARK);
+            boolean voidRejected = false;
+            try { DungeonBuilder.safeSpawnSpot(world, air); }
+            catch (MobSpawner.Failure expected) { voidRejected = true; }
+            allOk &= line(report, voidRejected, "★ 悬空标记被拒绝，不会凭空铺石台", "悬空标记没有被拒绝");
+            for (int x = -1; x <= 1; x++) {
+                for (int z = -1; z <= 1; z++) {
+                    world.getBlockAt(MARK + x, air.getBlockY() - 1, MARK + z).setType(Material.STONE, false);
+                }
+            }
+            Location safe = DungeonBuilder.safeSpawnSpot(world, air);
+            Block ground = world.getBlockAt(safe.getBlockX(), safe.getBlockY() - 1, safe.getBlockZ());
+            allOk &= line(report, ground.getType().isSolid(),
+                    "★ 首领测试点能落到实地（" + Markers.fmt(Markers.of(safe)) + "，脚下 "
+                            + ground.getType() + "）",
+                    "★ 悬空处没给出落脚点（脚下是 " + ground.getType() + "）—— 首领会掉出世界");
+
+            // ② 没有玩家参与的死 → 不算玩家击杀
+            org.bukkit.entity.LivingEntity lonely =
+                    (org.bukkit.entity.LivingEntity) world.spawnEntity(safe,
+                            org.bukkit.entity.EntityType.ZOMBIE);
+            lonely.setHealth(0);
+            allOk &= line(report, !PlayerHits.countsAsPlayerKill(lonely),
+                    "★ 没有任何玩家碰过的怪死了 → 不算玩家击杀（这就是 boss 自己消失却结算的成因）",
+                    "★ 没人碰过的怪死了却被算成玩家击杀");
+
+            // ③ 有玩家打过、随后死于环境 → 仍算玩家击杀
+            List<Player> online = new ArrayList<>(Bukkit.getOnlinePlayers());
+            if (online.isEmpty()) {
+                report.add("§7[说明] §r「被玩家打过的怪死于环境仍算击杀」这一条需要一名在线玩家，"
+                        + "本次跳过（有人在线时重跑 §f/nwd doctor§r 就能验）");
+            } else {
+                Player someone = online.get(0);
+                org.bukkit.entity.LivingEntity hit =
+                        (org.bukkit.entity.LivingEntity) world.spawnEntity(safe,
+                                org.bukkit.entity.EntityType.ZOMBIE);
+                PlayerHits.record(hit, someone);
+                hit.setHealth(0);
+                allOk &= line(report, PlayerHits.countsAsPlayerKill(hit),
+                        "★ 被玩家（" + someone.getName() + "）打过、随后死于环境 → 仍算玩家击杀"
+                                + "（打进岩浆 / 打落虚空走的就是这条）",
+                        "★ 被玩家打过却不算击杀");
+                PlayerHits.forget(hit);
+            }
+        } finally {
+            store.unload(world, false);
+            WorldStore.deleteFolder(world.getWorldFolder());
+        }
+        return allOk;
+    }
+
+    /**
+     * 区块票据自检：**玩家走慢时，远处的怪为什么不会"刷没"**。
+     *
+     * <p>怪身上的 persistent 只能防"自然消失"，**防不住区块卸载**：玩家离得远时，
+     * 副本另一头的区块卸载 → 里面的怪从内存里消失 → 插件看成"怪不见了"。
+     * 所以一局开始时要把它用到的区块钉住，这一条验的就是这件事。
+     */
+    private boolean chunkTicketChecks(List<String> report) {
+        boolean allOk = true;
+
+        // ① 纯计算：落点 (0,64,0) + 140 格外的首领位 → 框要覆盖到那边
+        DungeonDef def = new DungeonDef("zz自检");
+        def.markers.start = new int[]{0, 64, 0};
+        def.markers.boss = new int[]{140, 64, 0};
+        int[] bounds = DungeonRun.ticketBounds(def);
+        allOk &= line(report, bounds != null && bounds[0] <= 0 && bounds[2] >= 8,
+                "★ 140 格大的副本，区块框算对了（"
+                        + (bounds == null ? "null" : bounds[0] + "," + bounds[1] + " → "
+                        + bounds[2] + "," + bounds[3]) + "）",
+                "★ 区块框算错：" + (bounds == null ? "null" : java.util.Arrays.toString(bounds)));
+
+        // ② 人手放歪到几千格外的标记要被夹住，不能把上千区块全钉住
+        def.markers.boss = new int[]{100000, 64, 100000};
+        int[] far = DungeonRun.ticketBounds(def);
+        int wide = far == null ? -1 : far[2] - far[0] + 1;
+        int deep = far == null ? -1 : far[3] - far[1] + 1;
+        allOk &= line(report, far != null && wide <= 25 && deep <= 25,
+                "★ 超远标记被夹在半径内（" + wide + "×" + deep + " 区块）",
+                "★ 超远标记没夹住：" + wide + "×" + deep + " 区块（会把上千区块全钉住）");
+
+        // ③ 真机：钉住一个 96 格外的区块，它应当真的保持加载
+        String worldName = Names.TEMPLATE_PREFIX + "zzselfticket";
+        cleanupQuietly(worldName);
+        World world = null;
+        try {
+            world = store.create(worldName, "void", false, false);
+        } catch (Throwable t) {
+            line(report, false, "", "票据自检建世界失败：" + t);
+        }
+        if (world == null) {
+            return line(report, false, "", "票据自检建不出世界");
+        }
+        try {
+            Location spawn = world.getSpawnLocation();
+            int cx = (spawn.getBlockX() >> 4) + 6;
+            int cz = (spawn.getBlockZ() >> 4) + 6;
+            world.addPluginChunkTicket(cx, cz, plugin);
+            world.getChunkAt(cx, cz);
+            allOk &= line(report, world.isChunkLoaded(cx, cz),
+                    "★ 钉住的远端区块确实保持加载（第 " + cx + "," + cz + " 区块，离出生点 96 格）",
+                    "★ 钉住了却还是没加载 —— 远处的怪会被卸载");
+            world.removePluginChunkTicket(cx, cz, plugin);
+        } finally {
+            store.unload(world, false);
+            WorldStore.deleteFolder(world.getWorldFolder());
+        }
+        return allOk;
+    }
+
+    /**
+     * "走进房间才开始刷怪"自检（1.5.0-M7 的核心改动）。
+     *
+     * <p>以前是**建房时就把每一间房的第一波全刷出来**，最远那间离玩家几百格 ——
+     * 既不在模拟距离内（不 tick），区块一卸载还会消失，于是出现
+     * "高难度副本里打得越慢、首领越容易自己消失然后直接结算"。
+     *
+     * <p>这条自检直接建一座真的副本，然后数怪：① 建房之后一只怪都不该有；
+     * ② 每一间都应当是"未开始"状态。
+     */
+    private boolean lazySpawnChecks(List<String> report) {
+        boolean allOk = true;
+        String worldName = Names.TEMPLATE_PREFIX + "zzselflazy";
+        cleanupQuietly(worldName);
+        World world = null;
+        try {
+            world = store.create(worldName, "void", false, false);
+        } catch (Throwable t) {
+            line(report, false, "", "懒刷自检建世界失败：" + t);
+        }
+        if (world == null) {
+            return line(report, false, "", "懒刷自检建不出世界");
+        }
+        try {
+            Tier tier = plugin.tier("iron");
+            if (tier == null) {
+                return line(report, false, "", "找不到 iron 难度，跳过懒刷自检");
+            }
+            int y = Math.max(world.getMinHeight() + 40, 64);
+            Dungeon dungeon = new DungeonBuilder().build(world, 8, y, 8, tier);
+
+            int preSpawned = 0;
+            int started = 0;
+            for (Dungeon.Room room : dungeon.rooms) {
+                preSpawned += room.mobs.size();
+                if (room.started) {
+                    started++;
+                }
+            }
+            allOk &= line(report, preSpawned == 0,
+                    "★ 建房时不再提前刷怪（" + dungeon.rooms.size() + " 间房，0 只怪）",
+                    "★ 建房时提前刷出了 " + preSpawned + " 只怪（远处的怪会因区块卸载而消失）");
+            allOk &= line(report, started == 0,
+                    "★ 所有房间都是「未开始」，等玩家走进去才刷",
+                    "★ 有 " + started + " 间房在建房时就标成已开始");
+            Dungeon.Room builtBossRoom = dungeon.rooms.get(dungeon.rooms.size() - 1);
+            for (String tierId : List.of("iron", "gold", "diamond")) {
+                Tier checkedTier = plugin.tier(tierId);
+                if (checkedTier == null) { continue; }
+                Dungeon plan = new DungeonBuilder().plan(world, 8, y, 8, checkedTier).dungeon();
+                Dungeon.Room finalRoom = plan.rooms.get(plan.rooms.size() - 1);
+                finalRoom.origin = builtBossRoom.origin;
+                finalRoom.center = builtBossRoom.center;
+                try {
+                    int lastWave = finalRoom.waves.size() - 1;
+                    DungeonBuilder.spawnWave(world, finalRoom, lastWave, checkedTier);
+                    int expected = finalRoom.waves.get(lastWave).size() + 1;
+                    allOk &= line(report, finalRoom.bossEntity != null && finalRoom.bossEntity.isValid()
+                                    && Math.abs(finalRoom.bossEntity.getHealth() - checkedTier.bossHealth()) < 0.01
+                                    && finalRoom.mobs.size() == expected,
+                            "★ M8 " + tierId + " 末关完整一波成功：护卫与首领共 " + expected + " 只",
+                            "M8 " + tierId + " 末关生成失败：" + (finalRoom.lastBossFailure == null ? "实体或数量不符" : finalRoom.lastBossFailure.getMessage()));
+                } catch (RuntimeException e) {
+                    allOk &= line(report, false, "", "M8 " + tierId + " 末关整波异常：" + e.getMessage());
+                } finally { finalRoom.entities.values().forEach(org.bukkit.entity.Entity::remove); }
+            }
+        } finally {
+            store.unload(world, false);
+            WorldStore.deleteFolder(world.getWorldFolder());
+        }
+        return allOk;
+    }
+
+    /** M8 生成回归：真实世界、真实实体和被其他插件取消生成的场景。 */
+    private boolean spawnSafetyChecks(List<String> report) {
+        boolean ok = true;
+        String name = Names.TEMPLATE_PREFIX + "zzselfspawn";
+        cleanupQuietly(name);
+        World world = null;
+        org.bukkit.event.Listener listener = null;
+        java.util.concurrent.atomic.AtomicBoolean cancel = new java.util.concurrent.atomic.AtomicBoolean();
+        java.util.concurrent.atomic.AtomicInteger mutateHealth = new java.util.concurrent.atomic.AtomicInteger();
+        try {
+            world = store.create(name, "void", false, false);
+            if (world == null) { return line(report, false, "", "M8 刷怪自检无法创建世界"); }
+            world.setDifficulty(org.bukkit.Difficulty.NORMAL);
+            final World checkedWorld = world;
+            listener = new org.bukkit.event.Listener() {
+                @org.bukkit.event.EventHandler(priority = org.bukkit.event.EventPriority.HIGHEST)
+                public void onSpawn(org.bukkit.event.entity.CreatureSpawnEvent event) {
+                    if (event.getLocation().getWorld().equals(checkedWorld) && mutateHealth.get() > 0) {
+                        var attribute = event.getEntity().getAttribute(org.bukkit.attribute.Attribute.GENERIC_MAX_HEALTH);
+                        if (attribute != null) {
+                            if (mutateHealth.get() == 1) { attribute.setBaseValue(60); event.getEntity().setHealth(60); }
+                            else { attribute.addModifier(new org.bukkit.attribute.AttributeModifier(
+                                    org.bukkit.NamespacedKey.minecraft("nwndungeon_selftest_external_health"),
+                                    20, org.bukkit.attribute.AttributeModifier.Operation.ADD_NUMBER)); }
+                        }
+                    }
+                    if (cancel.get() && event.getLocation().getWorld().equals(checkedWorld)) {
+                        event.setCancelled(true);
+                    }
+                }
+            };
+            plugin.getServer().getPluginManager().registerEvents(listener, plugin);
+            int y = 64;
+            for (int x = -5; x <= 5; x++) {
+                for (int z = -5; z <= 5; z++) {
+                    world.getBlockAt(x, y - 1, z).setType(Material.STONE, false);
+                }
+            }
+            Location point = new Location(world, 0.5, y, 0.5);
+            ok &= ordinaryRecoveryChecks(world, point, report, true);
+            ok &= ordinaryRecoveryChecks(world, point, report, false);
+            for (int mutation : new int[]{1, 2}) {
+                mutateHealth.set(mutation);
+                org.bukkit.entity.LivingEntity changed = MobSpawner.spawn(world, point,
+                        org.bukkit.entity.EntityType.ZOMBIE, entity -> MobHealth.apply(entity, 160));
+                try {
+                    ok &= line(report, Math.abs(changed.getHealth() - 160) < 0.01
+                                    && Math.abs(changed.getAttribute(org.bukkit.attribute.Attribute.GENERIC_MAX_HEALTH).getValue() - 160) < 0.01,
+                            "★ M8 生成事件" + (mutation == 1 ? "改成60" : "增加生命修饰器") + "后仍按配置160生成",
+                            "M8 生成事件覆盖了配置血量，场景 " + mutation);
+                } finally { changed.remove(); mutateHealth.set(0); }
+            }
+            org.bukkit.entity.LivingEntity zombie = MobSpawner.spawn(world, point,
+                    org.bukkit.entity.EntityType.ZOMBIE, null);
+            ok &= line(report, zombie.isValid() && !zombie.getRemoveWhenFarAway() && zombie.isPersistent(),
+                    "★ M8 普通怪生成有效，已显式关闭远离玩家后的自然消失", "M8 防自然消失标志错误");
+            zombie.remove();
+            for (org.bukkit.entity.EntityType type : List.of(org.bukkit.entity.EntityType.SKELETON,
+                    org.bukkit.entity.EntityType.STRAY, org.bukkit.entity.EntityType.BOGGED,
+                    org.bukkit.entity.EntityType.PILLAGER)) {
+                org.bukkit.entity.LivingEntity ranged = MobSpawner.spawn(world, point, type, null);
+                try {
+                    Material expected = type == org.bukkit.entity.EntityType.PILLAGER ? Material.CROSSBOW : Material.BOW;
+                    ok &= line(report, ranged.getEquipment() != null
+                                    && ranged.getEquipment().getItemInMainHand().getType() == expected,
+                            "★ M8 原版默认武器保留：" + type + " / " + expected,
+                            "M8 原版默认武器丢失：" + type);
+                } finally { ranged.remove(); }
+            }
+            var customYaml = SafeYaml.parse("type: SKELETON\nequipment:\n  mainhand:\n    item: IRON_SWORD\n", "自检装备模板");
+            MobTemplate custom = MobTemplate.from("selftest_weapon", customYaml);
+            org.bukkit.entity.LivingEntity equipped = MobSpawner.spawn(world, point,
+                    org.bukkit.entity.EntityType.SKELETON, custom::apply);
+            try {
+                ok &= line(report, equipped.getEquipment().getItemInMainHand().getType() == Material.IRON_SWORD,
+                        "★ M8 自定义模板武器仍能覆盖原版弓", "M8 原版初始化覆盖了自定义武器");
+            } finally { equipped.remove(); }
+            org.bukkit.entity.LivingEntity unarmed = MobSpawner.spawn(world, point,
+                    org.bukkit.entity.EntityType.SKELETON,
+                    entity -> entity.getEquipment().setItemInMainHand(new ItemStack(Material.AIR)));
+            try {
+                ok &= line(report, unarmed.getEquipment().getItemInMainHand().getType().isAir(),
+                        "★ M8 显式空手配置仍然生效", "M8 显式空手被默认弓覆盖");
+            } finally { unarmed.remove(); }
+            Tier loaded = plugin.tier("iron");
+            if (loaded != null) {
+                var disk = SafeYaml.read(new File(plugin.getDataFolder(), "config.yml"));
+                double diskHealth = MobHealth.read(disk, "tiers.iron.boss.health", 60);
+                ok &= line(report, loaded.bossHealth() == diskHealth,
+                        "★ M8 iron 生效配置与磁盘一致：首领血量 " + diskHealth,
+                        "M8 iron 配置未生效：磁盘 " + diskHealth + " / 内存 " + loaded.bossHealth()
+                                + "，文件 " + new File(plugin.getDataFolder(), "config.yml").getAbsolutePath());
+                Dungeon.Room bossRoom = new Dungeon.Room(1);
+                bossRoom.center = point;
+                bossRoom.origin = point.clone().add(-12, -1, -12);
+                DungeonBuilder.spawnBoss(world, bossRoom, loaded);
+                try {
+                    double actual = bossRoom.bossEntity.getHealth();
+                    double maximum = bossRoom.bossEntity.getAttribute(org.bukkit.attribute.Attribute.GENERIC_MAX_HEALTH).getValue();
+                    ok &= line(report, Math.abs(actual - loaded.bossHealth()) < 0.01 && Math.abs(maximum - actual) < 0.01,
+                            "★ M8 内置首领真实血量 " + actual + " / " + maximum + "，配置 " + loaded.bossHealth(),
+                            "M8 内置首领血量不符：配置 " + loaded.bossHealth() + "，实体 " + actual + " / " + maximum);
+                    var checkBar = Bukkit.createBossBar("自检", org.bukkit.boss.BarColor.RED, org.bukkit.boss.BarStyle.SOLID);
+                    try {
+                        Instances.Slot sample = new Instances.Slot(-1, point);
+                        sample.settings = loaded; sample.bar = checkBar; sample.dungeon = new Dungeon();
+                        bossRoom.bossRoom = true; sample.dungeon.rooms.add(bossRoom);
+                        Instances sampleInstances = new Instances(plugin);
+                        sampleInstances.refreshBar(sample);
+                        String configuredText = java.math.BigDecimal.valueOf(loaded.bossHealth()).stripTrailingZeros().toPlainString();
+                        boolean full = checkBar.getTitle().endsWith(configuredText + " / " + configuredText) && checkBar.getProgress() == 1.0;
+                        bossRoom.bossEntity.setHealth(actual * 0.75);
+                        sampleInstances.refreshBar(sample);
+                        ok &= line(report, full && Math.abs(checkBar.getProgress() - 0.75) < 0.001
+                                        && checkBar.getTitle().endsWith(" / " + configuredText),
+                                "★ M8 内置 BossBar 与配置 " + configuredText + " 同步，受伤后进度为 75%",
+                                "M8 内置 BossBar 与实体/配置不一致：" + checkBar.getTitle());
+                    } finally { checkBar.removeAll(); }
+                } finally { bossRoom.bossEntity.remove(); }
+            }
+            DungeonDef customDef = new DungeonDef("zzselfhealth");
+            customDef.boss.health = 160;
+            DungeonRun customRun = new DungeonRun(plugin, customDef, world, store, false);
+            var configureBoss = DungeonRun.class.getDeclaredMethod("configureBoss", org.bukkit.entity.LivingEntity.class, MobTemplate.class);
+            configureBoss.setAccessible(true);
+            org.bukkit.entity.LivingEntity customBoss = MobSpawner.spawn(world, point,
+                    org.bukkit.entity.EntityType.SKELETON, entity -> {
+                        try { configureBoss.invoke(customRun, entity, custom); }
+                        catch (ReflectiveOperationException e) { throw new MobSpawner.Failure("自检首领配置失败", e); }
+                    });
+            try {
+                ok &= line(report, Math.abs(customBoss.getHealth() - 160) < 0.01,
+                        "★ M8 自建首领真实血量 160，正确覆盖模板血量", "M8 首领血量被模板覆盖");
+                var checkBar = Bukkit.createBossBar("自检", org.bukkit.boss.BarColor.RED, org.bukkit.boss.BarStyle.SOLID);
+                try {
+                    var stageField = DungeonRun.class.getDeclaredField("stages"); stageField.setAccessible(true);
+                    @SuppressWarnings("unchecked") List<DungeonRun.Stage> sampleStages = (List<DungeonRun.Stage>) stageField.get(customRun);
+                    DungeonRun.Stage sampleStage = new DungeonRun.Stage(0);
+                    sampleStage.bossStage = true; sampleStage.bossId = customBoss.getUniqueId(); sampleStage.bossEntity = customBoss;
+                    sampleStages.add(sampleStage);
+                    var barField = DungeonRun.class.getDeclaredField("bar"); barField.setAccessible(true); barField.set(customRun, checkBar);
+                    customRun.refreshBar();
+                    boolean full = checkBar.getTitle().endsWith("160 / 160") && checkBar.getProgress() == 1.0;
+                    customBoss.setHealth(120.5); customRun.refreshBar();
+                    ok &= line(report, full && checkBar.getTitle().endsWith("120.5 / 160")
+                                    && Math.abs(checkBar.getProgress() - 120.5 / 160) < 0.00001,
+                            "★ M8 自建 BossBar 满血 160/160，受伤后 120.5/160 与实体一致",
+                            "M8 自建 BossBar 未同步：" + checkBar.getTitle());
+                    customBoss.getAttribute(org.bukkit.attribute.Attribute.GENERIC_MAX_HEALTH).setBaseValue(60);
+                    customBoss.setHealth(45);
+                    customRun.refreshBar();
+                    ok &= line(report, customRun.failure() == null && checkBar.getTitle().endsWith("45 / 160")
+                                    && Math.abs(customBoss.getAttribute(org.bukkit.attribute.Attribute.GENERIC_MAX_HEALTH).getValue() - 160) < 0.01
+                                    && Math.abs(customBoss.getHealth() - 45) < 0.01,
+                            "★ M8 战斗中上限被改成60，已校正为160并保留剩余45，本局继续",
+                            "M8 血条仍因可修复的属性变化结束整局");
+                } finally { checkBar.removeAll(); }
+            } finally { customBoss.remove(); }
+            org.bukkit.entity.LivingEntity fractional = MobSpawner.spawn(world, point,
+                    org.bukkit.entity.EntityType.ZOMBIE, entity -> MobHealth.apply(entity, 12.5));
+            try {
+                ok &= line(report, Math.abs(fractional.getHealth() - 12.5) < 0.01,
+                        "★ M8 小于 20 的小数血量 12.5 不再被抬高", "M8 小数或低血量配置失效");
+            } finally { fractional.remove(); }
+            world.getBlockAt(0, y + 2, 0).setType(Material.STONE, false);
+            org.bukkit.entity.LivingEntity tall = MobSpawner.spawn(world, point,
+                    org.bukkit.entity.EntityType.WITHER_SKELETON, null);
+            ok &= line(report, tall.isValid() && !tall.collidesAt(tall.getLocation())
+                            && (tall.getLocation().getBlockX() != 0 || tall.getLocation().getBlockZ() != 0),
+                    "★ M8 按真实体型避开低矮天花，不把凋灵骷髅塞进两格空间", "M8 高个怪生成位置不安全");
+            ok &= line(report, tall.getEquipment().getItemInMainHand().getType() == Material.STONE_SWORD,
+                    "★ M8 凋灵骷髅保留原版石剑", "M8 凋灵骷髅默认石剑丢失");
+            tall.remove();
+            boolean rejected = false;
+            try { MobSpawner.spawn(world, new Location(world, 32.5, y, 0.5),
+                    org.bukkit.entity.EntityType.ZOMBIE, null); }
+            catch (MobSpawner.Failure expected) { rejected = true; }
+            ok &= line(report, rejected && world.getBlockAt(32, y - 1, 0).getType() == Material.AIR,
+                    "★ M8 无落脚点时明确失败，不铺石台、不刷入虚空", "M8 悬空点被错误接受或修改了建筑");
+            cancel.set(true);
+            boolean cancellationCaught = false;
+            try { MobSpawner.spawn(world, point, org.bukkit.entity.EntityType.ZOMBIE, null); }
+            catch (MobSpawner.Failure expected) { cancellationCaught = true; }
+            ok &= line(report, cancellationCaught, "★ M8 生成事件被取消时报告失败，不登记假实体", "M8 取消生成仍被当作成功");
+        } catch (Throwable e) {
+            ok &= line(report, false, "", "M8 刷怪安全自检异常：" + e);
+        } finally {
+            if (listener != null) { org.bukkit.event.HandlerList.unregisterAll(listener); }
+            if (world != null) { store.unload(world, false); }
+            WorldStore.deleteFolder(store.folderOf(name));
+        }
+        return ok;
+    }
+
+    /** 实际调用两套波次生成与失踪巡检；改等待时间戳，避免阻塞服务端主线程。 */
+    private boolean ordinaryRecoveryChecks(World world, Location point, List<String> report, boolean builtin) throws Exception {
+        String label = builtin ? "内置" : "自建";
+        Instances instances = new Instances(plugin);
+        Instances.Slot slot = new Instances.Slot(-7, point);
+        slot.busy = true; slot.settings = plugin.tier("iron"); slot.dungeon = new Dungeon();
+        Dungeon.Room room = new Dungeon.Room(1);
+        room.displayIndex = 2; room.started = true; room.origin = point.clone().add(-6, -1, -6);
+        room.waves.add(List.of(org.bukkit.entity.EntityType.SKELETON, org.bukkit.entity.EntityType.SKELETON));
+        slot.dungeon.rooms.add(room);
+        var worldField = Instances.class.getDeclaredField("world"); worldField.setAccessible(true); worldField.set(instances, world);
+        var slotsField = Instances.class.getDeclaredField("slots"); slotsField.setAccessible(true);
+        @SuppressWarnings("unchecked") var slots = (java.util.Map<Integer, Instances.Slot>) slotsField.get(instances);
+        slots.put(slot.index, slot);
+        DungeonRun run = new DungeonRun(plugin, new DungeonDef("zzselfrecovery"), world, store, false);
+        DungeonRun.Stage stage = new DungeonRun.Stage(0); stage.started = true;
+        stage.waves.add(List.of(org.bukkit.entity.EntityType.SKELETON, org.bukkit.entity.EntityType.SKELETON));
+        stage.templates.add(java.util.Arrays.asList(null, null)); stage.spots.add(List.of(point));
+        var stagesField = DungeonRun.class.getDeclaredField("stages"); stagesField.setAccessible(true);
+        @SuppressWarnings("unchecked") var stages = (List<DungeonRun.Stage>) stagesField.get(run); stages.add(stage);
+        var prune = builtin ? Instances.class.getDeclaredMethod("pruneVanishedMobs", Instances.Slot.class)
+                : DungeonRun.class.getDeclaredMethod("pruneVanishedMobs");
+        prune.setAccessible(true);
+        Runnable inspect = () -> {
+            try { if (builtin) { prune.invoke(instances, slot); } else { prune.invoke(run); } }
+            catch (ReflectiveOperationException e) { throw new IllegalStateException(e); }
+        };
+        List<java.util.UUID> mobs = builtin ? room.mobs : stage.mobs;
+        var entities = builtin ? room.entities : stage.entities;
+        var recoveries = builtin ? room.mobRecovery : stage.mobRecovery;
+        boolean ok = true;
+        try {
+            if (builtin) { DungeonBuilder.spawnWave(world, room, 0, slot.settings); }
+            else {
+                var spawn = DungeonRun.class.getDeclaredMethod("spawnWave", DungeonRun.Stage.class, int.class);
+                spawn.setAccessible(true); spawn.invoke(run, stage, 0);
+            }
+            ok &= line(report, mobs.size() == 2 && recoveries.size() == 2,
+                    "★ M8 " + label + "真实波次为普通怪登记恢复记录", label + "波次缺少恢复记录");
+            java.util.UUID lost = mobs.get(0);
+            var original = entities.get(lost); original.setHealth(7.5); original.remove();
+            inspect.run();
+            boolean waited = mobs.get(0).equals(lost) && mobs.size() == 2;
+            MobRecovery state = recoveries.get(lost);
+            // 上面的首次巡检已开始计时；先结束等待再注入测试时间。
+            state.recovery.found(); state.recovery.missing(System.currentTimeMillis() - 5_100, true);
+            inspect.run();
+            var replacement = entities.get(mobs.get(0));
+            ok &= line(report, waited && !mobs.get(0).equals(lost) && replacement.isValid()
+                            && Math.abs(replacement.getHealth() - 7.5) < 0.01
+                            && replacement.getEquipment().getItemInMainHand().getType() == Material.BOW
+                            && mobs.size() == 2 && (builtin ? slot.failure == null && room.kills == 0 : run.failure() == null && run.kills == 0),
+                    "★ M8 " + label + "怪物异常移除后先等待，再恢复原弓和剩余7.5血；未增加击杀或推进",
+                    label + "普通怪恢复错误或被算作击杀");
+            boolean deathHandled = builtin ? instances.onMobDeath(replacement) : run.onMobDeath(replacement);
+            replacement.remove(); inspect.run();
+            ok &= line(report, deathHandled && mobs.size() == 1 && recoveries.size() == 1
+                            && (builtin ? room.kills == 1 : run.kills == 1),
+                    "★ M8 " + label + "确认死亡后清除恢复记录，不再补刷", label + "已击杀怪物被重新补刷");
+            MobRecovery lineage = recoveries.get(mobs.get(0));
+            boolean retainedBudget = true;
+            for (int attempt = 1; attempt <= SpawnRecovery.MAX_RETRIES; attempt++) {
+                java.util.UUID previous = mobs.get(0); entities.get(previous).remove();
+                lineage.recovery.missing(System.currentTimeMillis() - 5_100, true);
+                inspect.run();
+                retainedBudget &= !mobs.get(0).equals(previous) && recoveries.get(mobs.get(0)) == lineage && lineage.attempts() == attempt;
+            }
+            entities.get(mobs.get(0)).remove();
+            lineage.recovery.missing(System.currentTimeMillis() - 5_100, true); inspect.run();
+            ok &= line(report, retainedBudget && mobs.size() == 1
+                            && (builtin ? slot.failure != null && !room.cleared : run.failure() != null && !run.completed && !stage.cleared),
+                    "★ M8 " + label + "连续移除最多恢复3次，换UUID不重置预算；耗尽后失败而非通关",
+                    label + "恢复预算被重置或错误通关");
+        } finally {
+            for (var entity : entities.values()) { entity.remove(); }
+            // 测试样本不调用退款和世界回收；只清理它自己的实体与区块票据。
+            if (!builtin) { run.cleanup(); }
+        }
+        return ok;
     }
 
     /** 在被拷过来的世界里找那块金块（允许 ±3 的 y 误差，方便诊断）。 */

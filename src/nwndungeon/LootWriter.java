@@ -37,8 +37,8 @@ public final class LootWriter {
      */
     public static int write(NWNDungeon plugin, String dungeonName, String key, List<ItemStack> items) {
         File file = new File(plugin.getDataFolder(), "loot.yml");
-        YamlConfiguration yaml = file.exists() ? YamlConfiguration.loadConfiguration(file)
-                : new YamlConfiguration();
+        String revision = SafeYaml.revision(file);
+        YamlConfiguration yaml = SafeYaml.read(file);
         String path = "dungeons." + dungeonName + "." + key;
         List<Map<String, Object>> out = new ArrayList<>();
         for (ItemStack stack : items) {
@@ -63,12 +63,7 @@ public final class LootWriter {
         } else {
             yaml.set(path, out);
         }
-        try {
-            yaml.save(file);
-        } catch (Exception e) {
-            plugin.getLogger().warning("写 loot.yml 失败：" + e.getMessage());
-            return 0;
-        }
+        SafeYaml.save(file, yaml, revision);
         plugin.reloadLoot();
         plugin.getLogger().info("已把 " + out.size() + " 项写进 loot.yml 的 " + path);
         return out.size();

@@ -69,6 +69,7 @@ import java.util.stream.Collectors;
 public final class NWNDungeon extends JavaPlugin implements Listener, CommandExecutor, TabCompleter {
 
     private final Random random = new Random();
+    private org.bukkit.configuration.file.FileConfiguration activeConfig;
     /**
      * 老配置里还没有 {@code rules.allowed-commands} 这一段时用的兜底白名单。
      *
@@ -125,19 +126,34 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
     private String instanceWorld;
     private int slotCount;
     private int slotSpacing;
+    private int maxActiveRuns;
+    private int buildOperationsPerTick;
+    private long buildNanosPerTick;
     private int recycleMinutes;
     private int castSeconds;
     private double cancelDistance;
     private final Map<Location, Cast> casts = new HashMap<>();
+    private final Set<UUID> pendingHealthBars = new HashSet<>();
     private final Map<String, MobTemplate> mobTemplates = new LinkedHashMap<>();
     private NamespacedKey mobKey;
+    private boolean configurationReady;
 
     @Override
     public void onEnable() {
-        saveDefaultConfig();
-        lootTables = LootTables.load(this);
-        panelConfig = PanelConfig.load(this);
-        loadSettings();
+        configurationReady = false;
+        activeConfig = null;
+        try {
+            saveDefaultConfig();
+            dungeonRegistry = new DungeonRegistry(this);
+            getLogger().info("启动配置加载：从磁盘读取 " + getDataFolder().getAbsolutePath());
+            loadConfigurationFromDisk(true, true);
+            getLogger().info("启动配置校验完成。首领血量：" + configuredBossHealth());
+        } catch (RuntimeException e) {
+            getLogger().log(java.util.logging.Level.SEVERE, "启动配置加载失败，副本功能已停用；请修正配置后重新启动插件。", e);
+            FailureDiagnostics.record(this, "启动配置加载失败", e.getMessage(), e);
+            getServer().getPluginManager().disablePlugin(this);
+            return;
+        }
         entrances = new Entrances(this);
         entranceRegistry = new EntranceRegistry(this);
         instances = new Instances(this);
@@ -146,8 +162,6 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
 
         // v1.5.0：自建副本（与世界复制路线）
         worldStore = new WorldStore(this);
-        dungeonRegistry = new DungeonRegistry(this);
-        dungeonRegistry.load();
         this.dungeonEditor = new Editor(this, worldStore, dungeonRegistry);
         instanceWorlds = new InstanceWorlds(this, worldStore, dungeonRegistry, this.dungeonEditor);
         chatPrompt = new ChatPrompt(this);
@@ -193,14 +207,16 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
             }
         }, 45L, 5L);
 
-        loadMobs();
         registerPlaceholders();
+        configurationReady = true;
         getLogger().info("副本插件已加载。入口生成=" + (generationEnabled ? "开" : "关")
                 + "，副本世界=" + instanceWorld + "，自建副本=" + dungeonRegistry.size() + " 个");
     }
 
     @Override
     public void onDisable() {
+        boolean wasReady = configurationReady;
+        configurationReady = false;
         for (Cast cast : casts.values()) {
             cast.bar.removeAll();
         }
@@ -209,7 +225,7 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
         if (instances != null) {
             instances.releaseAllTickets();
         }
-        savePendingDelete();
+        if (wasReady) { savePendingDelete(); }
         // 正在编辑的模板世界**不主动卸载**：它有自动保存，下次启动会被搬进
         // templates/_recovered/ 等管理员处理，不会丢
     }
@@ -272,6 +288,11 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
             if (!folder.exists()) {
                 continue;
             }
+            if (Bukkit.getWorlds().stream().anyMatch(world -> folder.equals(world.getWorldFolder()))) {
+                left.add(folder);
+                getLogger().warning("世界仍在加载，跳过待删目录：" + folder.getName());
+                continue;
+            }
             if (WorldStore.deleteFolder(folder)) {
                 getLogger().info("补删成功：" + folder.getName());
             } else {
@@ -285,13 +306,6 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
     }
 
     // ------------------------------------------------------------ 怪物模板
-
-    private void loadMobs() {
-        mobTemplates.clear();
-        mobTemplates.putAll(MobTemplate.loadAll(this));
-        getLogger().info("怪物模板 " + mobTemplates.size() + " 个："
-                + (mobTemplates.isEmpty() ? "（无）" : String.join(", ", mobTemplates.keySet())));
-    }
 
     public MobTemplate mobTemplate(String id) {
         return id == null ? null : mobTemplates.get(id.toLowerCase(Locale.ROOT));
@@ -318,9 +332,64 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
         }
     }
 
-    private void loadSettings() {
-        reloadConfig();
-        var cfg = getConfig();
+    /** 启动与 /nwd reload 共用：全部从磁盘准备并校验后，才替换内存配置。 */
+    private void loadConfigurationFromDisk(boolean admin, boolean dev) {
+        LootTables nextLoot = admin ? LootTables.load(this) : lootTables;
+        PanelConfig nextPanel = admin ? PanelConfig.load(this) : panelConfig;
+        Map<String, MobTemplate> nextMobs = admin ? MobTemplate.loadAll(this) : null;
+        var nextConfig = admin ? SafeYaml.read(new File(getDataFolder(), "config.yml")) : getConfig();
+        Map<String, Tier> nextTiers = admin ? prepareTiers(nextConfig, nextLoot) : null;
+        DungeonRegistry.Pending pending = dev ? dungeonRegistry.prepareLoad() : null;
+        if (admin) {
+            lootTables = nextLoot;
+            panelConfig = nextPanel;
+            mobTemplates.clear();
+            mobTemplates.putAll(nextMobs);
+            applySettings(nextConfig, nextTiers);
+            getLogger().info("怪物模板已载入：" + mobTemplates.size() + " 个");
+        }
+        if (pending != null) { dungeonRegistry.install(pending); }
+    }
+
+    private String configuredBossHealth() {
+        return tiers.values().stream().map(loaded -> loaded.id() + "=" + loaded.bossHealth())
+                .collect(java.util.stream.Collectors.joining("、"));
+    }
+
+    @Override
+    public org.bukkit.configuration.file.FileConfiguration getConfig() {
+        return activeConfig == null ? super.getConfig() : activeConfig;
+    }
+
+    private Map<String, Tier> prepareTiers(org.bukkit.configuration.file.FileConfiguration cfg, LootTables loot) {
+        Map<String, Tier> prepared = new LinkedHashMap<>();
+        ConfigurationSection section = cfg.getConfigurationSection("tiers");
+        if (section == null) { throw new SafeYaml.Problem("config.yml 缺少 tiers 配置段"); }
+        for (String key : section.getKeys(false)) {
+            ConfigurationSection tier = section.getConfigurationSection(key);
+            if (tier == null) { throw new SafeYaml.Problem("难度配置不是键值表：" + key); }
+            prepared.put(key.toLowerCase(Locale.ROOT), Tier.from(key.toLowerCase(Locale.ROOT), tier, loot));
+        }
+        if (cfg.getInt("generation.min-y", 60) > cfg.getInt("generation.max-y", 120)) {
+            throw new SafeYaml.Problem("入口最低高度不能大于最高高度");
+        }
+        requirePositiveInteger(cfg, "performance.max-active-runs", 2, 64);
+        requirePositiveInteger(cfg, "performance.build-operations-per-tick", 2048, 65536);
+        requirePositiveInteger(cfg, "performance.build-budget-ms", 2, 20);
+        return prepared;
+    }
+
+    private static int requirePositiveInteger(ConfigurationSection cfg, String path, int fallback, int max) {
+        Object value = cfg.get(path);
+        if (value == null) { return fallback; }
+        if (!(value instanceof Integer number) || number < 1 || number > max) {
+            throw new SafeYaml.Problem(path + " 必须是 1 到 " + max + " 的整数");
+        }
+        return (Integer) value;
+    }
+
+    private void applySettings(org.bukkit.configuration.file.FileConfiguration cfg, Map<String, Tier> prepared) {
+        activeConfig = cfg;
 
         genWorlds.clear();
         genWorlds.addAll(cfg.getStringList("worlds"));
@@ -352,19 +421,17 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
         slotCount = Math.max(1, cfg.getInt("instance.slots", 8));
         slotSpacing = Math.max(300, cfg.getInt("instance.slot-spacing", 600));
         recycleMinutes = Math.max(1, cfg.getInt("instance.empty-recycle-minutes", 5));
+        maxActiveRuns = requirePositiveInteger(cfg, "performance.max-active-runs", 2, 64);
+        buildOperationsPerTick = requirePositiveInteger(cfg, "performance.build-operations-per-tick", 2048, 65536);
+        buildNanosPerTick = requirePositiveInteger(cfg, "performance.build-budget-ms", 2, 20) * 1_000_000L;
 
         tiers.clear();
-        ConfigurationSection tierSection = cfg.getConfigurationSection("tiers");
-        if (tierSection != null) {
-            for (String key : tierSection.getKeys(false)) {
-                tiers.put(key.toLowerCase(Locale.ROOT), Tier.from(key.toLowerCase(Locale.ROOT),
-                        tierSection.getConfigurationSection(key), lootTables));
-            }
-        }
+        tiers.putAll(prepared);
         for (Tier loaded : tiers.values()) {
             int waves = loaded.rooms().stream().mapToInt(List::size).sum();
             getLogger().info("难度 " + loaded.id() + "：" + loaded.rooms().size()
-                    + " 个战斗房 / 共 " + waves + " 波，首领房 " + loaded.bossRoomWaves().size() + " 波");
+                    + " 个战斗房 / 共 " + waves + " 波，首领房 " + loaded.bossRoomWaves().size()
+                    + " 波，首领血量=" + loaded.bossHealth());
         }
 
         keepInventory = cfg.getBoolean("rules.keep-inventory-on-death", true);
@@ -627,6 +694,7 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
     }
 
     private void trigger(Location door) {
+        if (!configurationReady) { return; }
         Entrances.Entry entry = entrances.get(door);
         if (entry == null || !entry.alive()) {
             return;
@@ -659,6 +727,7 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
         if (members.isEmpty()) {
             return;
         }
+        if (entryBlocked(members)) { buttonPresser.remove(door); return; }
         // 区块里不止一个人：先弹确认面板（谁按下按钮谁确认），确认后才开始读条
         UUID presserId = buttonPresser.remove(door);
         Player presser = presserId == null ? null : Bukkit.getPlayer(presserId);
@@ -676,6 +745,7 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
      * lenient = 允许队员站得离门比较远（多人在区块里确认进本时用，不然读条会被"走远"判定取消）。
      */
     private void startEntry(Entrances.Entry entry, Location door, List<Player> members, boolean lenient) {
+        if (members.isEmpty() || entryBlocked(members)) { return; }
         if (door != null && casts.containsKey(door)) {
             return;
         }
@@ -750,6 +820,7 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
     }
 
     private void startCast(Location door, Entrances.Entry entry, List<Player> party, boolean lenient) {
+        if (entryBlocked(party)) { return; }
         Cast cast = new Cast(door, entry.target(), entryLabel(entry), lenient);
         for (Player player : party) {
             cast.party.add(player.getUniqueId());
@@ -811,11 +882,26 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
             cast.taskId = -1;
         }
         cast.bar.removeAll();
-        casts.remove(cast.door);
+        casts.remove(cast.door, cast);
+    }
+
+    /** 按钮、确认面板和读条入口共同检查，不能等读条结束后才拒绝重复进入。 */
+    private boolean entryBlocked(List<Player> party) {
+        boolean busy = party.stream().anyMatch(player -> playerBusy(player.getUniqueId())
+                || casts.values().stream().anyMatch(cast -> cast.party.contains(player.getUniqueId())));
+        if (busy || preparingRun() || !canReserveRun()) {
+            party.forEach(player -> player.sendMessage("§5[副本]§r §e正在准备副本或已有进入任务，请等待完成，不必重复按按钮。"));
+            return true;
+        }
+        return false;
     }
 
     /** 读条完成（或 0 秒配置）后真正进本：内置副本分槽位、自建副本复制一个世界。 */
     private void enter(Entrances.Entry entry, List<Player> party) {
+        if (party.stream().anyMatch(player -> playerBusy(player.getUniqueId()))) {
+            party.forEach(player -> player.sendMessage("§5[副本]§r §c队伍中有人正在另一局副本中或正在进入，请稍后重试。"));
+            return;
+        }
         if (entry.isDungeon()) {
             DungeonDef def = dungeonRegistry == null ? null : dungeonRegistry.find(entry.target());
             if (def == null) {
@@ -825,24 +911,42 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
             instanceWorlds.start(def, party, false);   // 体力、并发上限都在里面查
             return;
         }
-        Tier tier = tier(entry.target());
-        Instances.Slot slot = instances.allocate(entry.target(), party);
-        if (slot == null) {
+        boolean accepted = instances.allocate(entry.target(), party,
+                slot -> finishBuiltinEntry(entry, party, slot),
+                reason -> party.forEach(p -> p.sendMessage("§5[副本]§r §c副本准备失败，本次未扣体力，请联系管理员。")));
+        if (!accepted) {
             if (denyWhenFull) {
-                party.forEach(p -> p.sendMessage("§5[副本]§r §c副本已满，稍后再来。"));
+                party.forEach(p -> p.sendMessage("§5[副本]§r §c副本名额已满或正在准备另一局，请稍后再来。"));
             }
             return;
         }
-        int cost = staminaCostOf(entry);
+        party.forEach(p -> p.sendMessage("§5[副本]§r §7正在分批准备副本，完成后传送；此时尚未扣体力。"));
+    }
+
+    private void finishBuiltinEntry(Entrances.Entry entry, List<Player> party, Instances.Slot slot) {
+        Tier tier = slot.settings;
+        if (party.stream().anyMatch(player -> !player.isOnline() || !perm(player, "use")
+                || !slot.entranceOf.containsKey(player.getUniqueId()))) {
+            instances.release(slot, "§c队伍状态已变化，进入取消，本次未扣体力。");
+            return;
+        }
+        int cost = stamina.enabled() && tier != null ? tier.staminaCost() : 0;
         if (cost > 0) {
             for (Player player : party) {
                 if (!stamina.spend(player, cost)) {
-                    player.sendMessage("§5[副本]§r §c体力不足，本次没扣（需要 " + cost + " 点）。");
+                    slot.failure = "进入时体力复核失败";
+                    instances.release(slot, "§c队员体力不足，进入取消，已扣体力已退还。");
+                    return;
                 }
+                slot.staminaPaid.put(player.getUniqueId(), cost);
             }
         }
         for (Player player : party) {
-            sendInto(slot, player, tier == null ? entry.target() : tier.display());
+            if (!sendInto(slot, player, tier == null ? entry.target() : tier.display())) {
+                slot.failure = "进本传送被取消";
+                instances.release(slot, "§c进入副本失败，已扣体力已退还。");
+                return;
+            }
         }
     }
 
@@ -1026,6 +1130,41 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
         if (instances.ready()) {
             instances.onMobDeath(entity);
         }
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onBossDamage(org.bukkit.event.entity.EntityDamageEvent event) {
+        if (event.getEntity() instanceof LivingEntity entity) { queueBossBar(entity); }
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onBossHeal(org.bukkit.event.entity.EntityRegainHealthEvent event) {
+        if (event.getEntity() instanceof LivingEntity entity) { queueBossBar(entity); }
+    }
+
+    /** 伤害/治疗事件发生时生命值尚未写入，下一 tick 读取；同一首领每 tick 最多排一次。 */
+    private void queueBossBar(LivingEntity entity) {
+        UUID uuid = entity.getUniqueId();
+        Instances.Slot slot = instances == null ? null : instances.byBoss(uuid);
+        DungeonRun run = instanceWorlds == null ? null : instanceWorlds.byWorld(entity.getWorld());
+        if (slot == null && (run == null || !run.hasBoss(uuid))) { return; }
+        if (!pendingHealthBars.add(uuid)) { return; }
+        Bukkit.getScheduler().runTask(this, () -> {
+            pendingHealthBars.remove(uuid);
+            if (slot != null && slot.busy && instances.byBoss(uuid) == slot) { instances.refreshBar(slot); }
+            if (run != null && instanceWorlds.byWorld(entity.getWorld()) == run && run.hasBoss(uuid)) { run.refreshBar(); }
+        });
+    }
+
+    /**
+     * 记下"这只怪最近被玩家打过"。
+     *
+     * <p>用途见 {@link PlayerHits}：首领被玩家打下虚空属于环境死亡，但**这一下是玩家打的**，
+     * 就该算玩家击杀 —— 只看死因会把它误判成"自己消失"。
+     */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onEntityDamaged(org.bukkit.event.entity.EntityDamageByEntityEvent event) {
+        PlayerHits.recordFrom(event);
     }
 
     /** 通关后房间中央的木门：右键即离开副本；自建副本的关卡门在没清场时不许推开。 */
@@ -1251,6 +1390,7 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
             return;
         }
         Bukkit.getScheduler().runTaskLater(this, () -> {
+            if (stamina != null) { stamina.current(player); }
             instances.resume(player);
             if (instanceWorlds != null) {
                 instanceWorlds.resume(player);
@@ -1288,17 +1428,20 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
             sender.sendMessage("§c你没有权限。");
             return;
         }
-        if (admin) {
-            lootTables = LootTables.load(this);
-            panelConfig = PanelConfig.load(this);
-            loadSettings();
-            loadMobs();
+        try {
+            loadConfigurationFromDisk(admin, dev);
+            if (admin) {
+                sender.sendMessage("§a已重载配置：" + new File(getDataFolder(), "config.yml").getAbsolutePath());
+                sender.sendMessage("§7下次开局的首领血量：" + configuredBossHealth());
+                sender.sendMessage("§7新配置对之后开局生效，已开始和正在准备的局保留开局配置。");
+            } else {
+                sender.sendMessage("§a已重载自建副本 dungeons.yml / registry.yml。");
+                sender.sendMessage("§e内置难度 config.yml 未重载，需要 nwd.admin 权限。");
+            }
+        } catch (SafeYaml.Problem failure) {
+            sender.sendMessage("§c重载失败，继续使用上一份配置：" + failure.getMessage());
+            getLogger().warning(failure.getMessage());
         }
-        if (dev) {
-            devCommands.handle(sender, new String[]{"reload"});
-            return;
-        }
-        sender.sendMessage("§a配置已重载。");
     }
 
     @Override
@@ -1425,17 +1568,15 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
                     sender.sendMessage("§c未知难度，可选：" + String.join(", ", tiers.keySet()));
                     return true;
                 }
-                Instances.Slot slot = instances.allocate(tierId, List.of());
-                if (slot == null) {
-                    sender.sendMessage("§c没有空闲槽位。");
-                    return true;
-                }
+                boolean accepted = instances.allocate(tierId, List.of(), slot -> {
                 slot.manualHold = true;
                 Location spawn = slot.spawn;
                 sender.sendMessage("§a槽位 #" + slot.index + " 已生成 " + tierId + " 难度副本。");
                 sender.sendMessage("§7原点 " + slot.origin.getBlockX() + "," + slot.origin.getBlockY()
                         + "," + slot.origin.getBlockZ() + "  出生点 "
                         + spawn.getBlockX() + "," + spawn.getBlockY() + "," + spawn.getBlockZ());
+                }, reason -> sender.sendMessage("§c副本准备失败：" + reason));
+                sender.sendMessage(accepted ? "§7正在分批准备测试副本…" : "§c名额已满或正在准备另一局，请稍后重试。");
             }
             case "list" -> {
                 if (!requireAdmin(sender)) {
@@ -1447,7 +1588,9 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
                 }
                 sender.sendMessage("§5[副本]§r 槽位状态：");
                 for (Instances.Slot slot : instances.all()) {
-                    sender.sendMessage("§7 #" + slot.index + (slot.busy
+                    sender.sendMessage("§7 #" + slot.index + (slot.preparing
+                            ? " §e准备中 §7难度=" + slot.tier + " · " + slot.preparationPhase
+                            : slot.busy
                             ? " §a占用 §7难度=" + slot.tier + " 人数=" + slot.entranceOf.size()
                               + " 剩余=" + Math.max(0, (slot.deadline - System.currentTimeMillis()) / 60000) + "分"
                             : " §8空闲"));
@@ -1474,6 +1617,7 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
                     sender.sendMessage("§c没有这个槽位。");
                     return true;
                 }
+                if (target.preparing) { sender.sendMessage("§c副本仍在准备，请完成后再传送。"); return true; }
                 Location spawn = target.busy && target.spawn != null ? target.spawn
                         : target.origin.clone().add(12, 2, 12);
                 player.teleport(spawn);
@@ -1509,14 +1653,7 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
                         : "§7槽位 #" + slotIndex + " 本来就是空闲的。");
             }
             case "reload" -> {
-                if (!requireAdmin(sender)) {
-                    return true;
-                }
-                lootTables = LootTables.load(this);
-                panelConfig = PanelConfig.load(this);
-                loadSettings();
-                loadMobs();
-                sender.sendMessage("§a配置已重载。");
+                reloadEverything(sender);
             }
             case "stamina" -> {
                 if (!(sender instanceof Player player)) {
@@ -1632,16 +1769,17 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
     // 骨架类 Template / TemplateEditor 暂时留着：M5 做入口建筑要抽里面的结构读写。
 
     /** 把玩家送进内置副本的槽位（自建副本走 InstanceWorlds，不用这一条）。 */
-    private void sendInto(Instances.Slot slot, Player player, String label) {
+    private boolean sendInto(Instances.Slot slot, Player player, String label) {
         slot.modeOf.put(player.getUniqueId(), player.getGameMode());
         instances.rememberMode(player, player.getGameMode());
         player.setGameMode(GameMode.ADVENTURE);
-        player.teleport(slot.spawn);
+        if (!player.teleport(slot.spawn)) { return false; }
         player.playSound(player.getLocation(), Sound.ENTITY_ENDERMAN_TELEPORT, 1f, 1f);
         player.sendMessage("§5[副本]§r 进入 " + label + " §r副本，限时 " + slot.limitMinutes + " 分钟。");
         player.sendMessage("§7体力：" + stamina.describe(player));
         player.sendMessage("§7脚下的磁石平台就是第一个检查点；死亡会回到最近的检查点，物品不会掉落。");
         player.sendMessage("§7随时可以用 §f/dungeon leave §7离开副本。");
+        return true;
     }
 
     private static String fmt(Location location) {
@@ -1720,6 +1858,25 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
 
     public Stamina stamina() {
         return stamina;
+    }
+
+    boolean playerBusy(UUID uuid) {
+        return instances != null && instances.byPlayer(uuid) != null
+                || instanceWorlds != null && (instanceWorlds.byPlayer(uuid) != null || instanceWorlds.isJoining(uuid));
+    }
+
+    int buildOperationsPerTick() { return buildOperationsPerTick; }
+    long buildNanosPerTick() { return buildNanosPerTick; }
+
+    boolean canReserveRun() {
+        int builtin = instances == null ? 0 : instances.reservedCount();
+        int custom = instanceWorlds == null ? 0 : instanceWorlds.reservedCount();
+        return configurationReady && builtin + custom < maxActiveRuns;
+    }
+
+    boolean preparingRun() {
+        return instances != null && instances.preparing()
+                || instanceWorlds != null && instanceWorlds.opening();
     }
 
 }

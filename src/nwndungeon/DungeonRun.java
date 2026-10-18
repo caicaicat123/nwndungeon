@@ -46,8 +46,7 @@ import java.util.UUID;
  * <ul>
  *   <li><b>分段</b>：关卡数 = 关卡门数 + 1，第 {@code gates.get(i)} 道门是"第 i 关的出口门"，
  *       最后一关是首领区（没有关卡门，用出口门）。</li>
- *   <li><b>清完一关就开它的门，并立刻开始下一关的第 1 波</b>（和内置副本"所有房间的第一波一开始就在"
- *       是同一个观感，比"等玩家跨过门再刷"简单得多，也不会出现"门开了但下一关还没醒"的空档）。</li>
+ *   <li><b>清完当前关才解锁下一关，玩家接近下一关才开始刷怪</b>，不提前启动后面的房间。</li>
  *   <li><b>关卡门由插件控制开合</b>：没清场时每 tick 强制关上 + 取消玩家的右键
  *       （只靠"每秒关一次"拦不住 —— 门是瞬开的，那一秒足够挤过去）。</li>
  *   <li><b>首领必须"确认击杀"</b>：沿用 v1.4.13 的判定（收到死亡事件才算），找不回就原地补刷（上限 3 次），
@@ -60,13 +59,12 @@ public final class DungeonRun {
     /** 一波清完到下一波刷出的间隔（tick）；与内置副本保持一致。 */
     private static final long WAVE_DELAY_TICKS = 60L;
     /** 在"已加载的区块里"连续查不到这么多秒才允许把这支怪从名单剔除（v1.4.13）。 */
-    private static final int MISSING_SECONDS_BEFORE_DROP = 5;
+    /** 走到离本关第一个刷怪点多近就算到位（格）。 */
+    private static final double STAGE_START_RADIUS = 24.0;
     /** 名单空着超过这么久还没推进 → 判定卡死，强制推进（v1.4.13）。 */
     private static final long STUCK_ROOM_MS = 10_000L;
     /** 等下一波远超 3 秒（刷怪任务没跑成）→ 强制重刷（v1.4.13）。 */
     private static final long STUCK_WAVE_MS = 15_000L;
-    /** 首领补刷上限（v1.4.13）。 */
-    private static final int MAX_BOSS_RESPAWNS = 3;
     /** 踩到检查点的判定半径。 */
     private static final double CHECKPOINT_RADIUS = 2.5;
 
@@ -96,6 +94,8 @@ public final class DungeonRun {
         /** 与 {@link #waves} 平行：这一波的刷怪点。 */
         public final List<List<Location>> spots = new ArrayList<>();
         public boolean bossStage;
+        /** 这一关是否已经开始（走进这一关才刷怪，见 startStagesNearPlayers）。 */
+        public boolean started;
         public boolean cleared;
         public int waveIndex;
         public boolean wavePending;
@@ -105,6 +105,13 @@ public final class DungeonRun {
         public final Map<UUID, Location> lastSeen = new HashMap<>();
         public final Map<UUID, Integer> missingSeconds = new HashMap<>();
         public UUID bossId;
+        public LivingEntity bossEntity;
+        public RuntimeException lastBossFailure;
+        public final SpawnRecovery bossRecovery = new SpawnRecovery();
+        public final Map<UUID, LivingEntity> entities = new HashMap<>();
+        public final Map<UUID, MobRecovery> mobRecovery = new HashMap<>();
+        public org.bukkit.scheduler.BukkitTask waveTask;
+        public boolean spawning;
         public boolean bossKilled;
         public int bossRespawns;
         /** 结算这一关时要开的门；null = 没门（例如没标关卡门的单关副本）。 */
@@ -144,6 +151,9 @@ public final class DungeonRun {
     public int currentStage;
     public int kills;
     public boolean completed;
+    private boolean closed;
+    private String failure;
+    private final Map<UUID, Integer> staminaPaid = new HashMap<>();
     public long emptySince;
     private org.bukkit.boss.BossBar bar;
 
@@ -161,6 +171,27 @@ public final class DungeonRun {
 
     public DungeonDef def() {
         return def;
+    }
+
+    public boolean hasBoss(UUID uuid) { return stages.stream().anyMatch(stage -> uuid.equals(stage.bossId)); }
+
+    public String failure() { return failure; }
+
+    public void paid(UUID uuid, int amount) {
+        if (amount > 0) { staminaPaid.put(uuid, amount); }
+    }
+
+    public void fail(String reason) {
+        fail(reason, null);
+    }
+
+    private void fail(String reason, Throwable cause) {
+        if (failure == null && !closed && !completed) {
+            failure = reason;
+            plugin.getLogger().severe("副本「" + def.name + "」异常终止：" + reason);
+            FailureDiagnostics.record(plugin, "自建副本终止 名称=" + def.name + " 世界="
+                    + (world == null ? "未创建" : world.getName()), reason, cause);
+        }
     }
 
     public int playerCount() {
@@ -197,7 +228,123 @@ public final class DungeonRun {
     // ---------------------------------------------------------------- 开局
 
     /** 建关卡表、刷第 1 关第 1 波、挂血条。 */
+    // ---------------------------------------------------------------- 区块票据
+
+    /**
+     * 以落点为中心最多钉住多少区块半径（12 区块 = 192 格）。
+     *
+     * <p>自建副本的标记是**人手放的**，放歪到几千格外也不奇怪 ——
+     * 那种情况不该把整片区块钉住，而是夹住 + 提醒管理员副本太大了。
+     */
+    private static final int MAX_TICKET_RADIUS_CHUNKS = 12;
+
+    /** 是否持有本局的区块票据。 */
+    private boolean ticketed;
+    private final Set<Long> chunkTickets = new LinkedHashSet<>();
+
+    /**
+     * 算出"这一局要把哪些区块钉住"。
+     *
+     * <p>返回 {@code {minChunkX, minChunkZ, maxChunkX, maxChunkZ}}；没有任何标记时返回 null。
+     * 这是**纯计算**（不碰服务器），所以能离线自检。
+     */
+    public static int[] ticketBounds(DungeonDef def) {
+        if (def == null || def.markers == null) {
+            return null;
+        }
+        Markers m = def.markers;
+        List<int[]> points = new ArrayList<>();
+        if (m.start != null) {
+            points.add(m.start);
+        }
+        if (m.boss != null) {
+            points.add(m.boss);
+        }
+        if (m.exitDoor != null) {
+            points.add(m.exitDoor);
+        }
+        points.addAll(m.gates);
+        for (Markers.Spawner spawner : m.spawners) {
+            points.add(spawner.pos);
+        }
+        for (Markers.Checkpoint checkpoint : m.checkpoints) {
+            points.add(checkpoint.pos);
+        }
+        for (Markers.Chest chest : m.chests) {
+            points.add(chest.pos);
+        }
+        if (points.isEmpty()) {
+            return null;
+        }
+        int minX = Integer.MAX_VALUE;
+        int minZ = Integer.MAX_VALUE;
+        int maxX = Integer.MIN_VALUE;
+        int maxZ = Integer.MIN_VALUE;
+        for (int[] p : points) {
+            minX = Math.min(minX, p[0]);
+            maxX = Math.max(maxX, p[0]);
+            minZ = Math.min(minZ, p[2]);
+            maxZ = Math.max(maxZ, p[2]);
+        }
+        // 与内置副本一致的 16 格外扩（怪会跑、房间有墙）
+        minX -= 16;
+        maxX += 16;
+        minZ -= 16;
+        maxZ += 16;
+        // 以落点（没标就用中心）为圆心夹住半径
+        int centerX = m.start != null ? m.start[0] : (minX + maxX) / 2;
+        int centerZ = m.start != null ? m.start[2] : (minZ + maxZ) / 2;
+        int limit = MAX_TICKET_RADIUS_CHUNKS * 16;
+        minX = Math.max(minX, centerX - limit);
+        maxX = Math.min(maxX, centerX + limit);
+        minZ = Math.max(minZ, centerZ - limit);
+        maxZ = Math.min(maxZ, centerZ + limit);
+        return new int[]{minX >> 4, minZ >> 4, maxX >> 4, maxZ >> 4};
+    }
+
+    /**
+     * 把这一局用到的区块**钉住**，直到本局结束。
+     *
+     * <p>M8 按落点与已启动波次的实际位置逐点保加载，不预先加载整张副本。
+     * 区块加载、实体激活和自然消失是不同机制：这里仅负责区块生命周期。
+     */
+    private void keepChunksLoaded() {
+        keepAt(startLocation());
+    }
+
+    /** 按实际使用的点钉区块，不再把远处的标记截断到落点周围 192 格。 */
+    private void keepAt(Location point) {
+        int x = point.getBlockX() >> 4;
+        int z = point.getBlockZ() >> 4;
+        for (int cx = x - 1; cx <= x + 1; cx++) {
+            for (int cz = z - 1; cz <= z + 1; cz++) {
+                long key = ((long) cx << 32) | (cz & 0xffffffffL);
+                if (chunkTickets.contains(key)) { continue; }
+                if (chunkTickets.size() >= 512) {
+                    throw new MobSpawner.Failure("本局刷怪点过于分散，需常驻的区块超过 512 个");
+                }
+                world.addPluginChunkTicket(cx, cz, plugin);
+                chunkTickets.add(key);
+                ticketed = true;
+            }
+        }
+    }
+
+    /** 撤掉这一局的区块票据（一局结束时调用）。 */
+    private void releaseChunks() {
+        if (!ticketed || world == null) {
+            return;
+        }
+        for (long key : chunkTickets) {
+            world.removePluginChunkTicket((int) (key >> 32), (int) key, plugin);
+        }
+        chunkTickets.clear();
+        ticketed = false;
+    }
+
     public void begin() {
+        // 先把这一局用到的区块钉住：玩家走得慢也不会让远处的怪被卸载（"刷没"的根源）
+        keepChunksLoaded();
         Markers markers = def.markers;
         int stageCount = markers.stageCount();
         for (int index = 0; index < stageCount; index++) {
@@ -227,6 +374,7 @@ public final class DungeonRun {
             openGate(first);
             advanceToNext(first);
         } else {
+            first.started = true;   // 玩家就在落点，第一关立刻开打
             spawnWave(first, 0);
         }
         announce("§5[副本]§r 进入「" + def.coloredDisplay() + "§r」，共 " + stages.size()
@@ -250,13 +398,13 @@ public final class DungeonRun {
                 spots.add(toLocation(spawner.pos));
             }
             if (spots.isEmpty() && !stage.bossStage) {
-                continue;   // 这一波没有刷怪点 → 整波跳过（校验里会提示）
+                throw new MobSpawner.Failure("第 " + (stage.index + 1) + " 关第 " + wave + " 波没有刷怪点");
             }
             List<EntityType> types = new ArrayList<>();
             List<String> templates = new ArrayList<>();
             parseWave(specs.get(wave - 1), types, templates);
-            if (types.isEmpty()) {
-                continue;
+            if (types.isEmpty() && !(stage.bossStage && wave == specs.size())) {
+                throw new MobSpawner.Failure("第 " + (stage.index + 1) + " 关第 " + wave + " 波阵容为空或无效");
             }
             stage.waves.add(types);
             stage.templates.add(templates);
@@ -289,22 +437,23 @@ public final class DungeonRun {
             stage.spots.add(new ArrayList<>());
         }
         if (stage.waves.isEmpty()) {
-            stage.cleared = true;
-            plugin.getLogger().warning("「" + def.name + "」第 " + (stage.index + 1)
-                    + " 关既没阵容也没刷怪点，直接算清场");
+            throw new MobSpawner.Failure("第 " + (stage.index + 1) + " 关没有阵容或刷怪点");
         }
     }
 
     /** 把 {@code "ZOMBIE:3,LAVA_BRUTE:2"} 展开成实体类型表 + 模板名表（解析本身在 WaveSpec 里，可离线测）。 */
     private void parseWave(String spec, List<EntityType> types, List<String> templates) {
-        for (WaveSpec.Item item : WaveSpec.parse(spec)) {
+        List<WaveSpec.Item> parsed = WaveSpec.parse(spec);
+        long tokens = spec == null ? 0 : java.util.Arrays.stream(spec.split(","))
+                .filter(token -> !token.isBlank()).count();
+        if (parsed.size() != tokens) { throw new MobSpawner.Failure("阵容格式错误：" + spec); }
+        for (WaveSpec.Item item : parsed) {
             String name = item.name();
             MobTemplate template = plugin.mobTemplate(name.toLowerCase(Locale.ROOT));
             EntityType type = template != null ? template.type() : entityType(name);
-            if (type == null) {
-                plugin.getLogger().warning("dungeons.yml 里「" + def.name + "」的阵容有认不出的怪："
-                        + name + "（既不是 mobs.yml 模板也不是原版实体名，已跳过）");
-                continue;
+            if (!MobSpawner.supported(type) || item.count() > MobSpawner.MAX_WAVE_SIZE
+                    || types.size() + item.count() > MobSpawner.MAX_WAVE_SIZE) {
+                throw new MobSpawner.Failure("无效的怪物或数量：" + name + ":" + item.count());
             }
             for (int i = 0; i < item.count(); i++) {
                 types.add(type);
@@ -329,7 +478,8 @@ public final class DungeonRun {
 
     /** 刷某一关的第 waveIndex 波（0 基）。 */
     private void spawnWave(Stage stage, int waveIndex) {
-        if (stage == null || stage.cleared || waveIndex < 0 || waveIndex >= stage.waveCount()) {
+        if (closed || failure != null || stage == null || stage.cleared
+                || waveIndex < 0 || waveIndex >= stage.waveCount()) {
             return;
         }
         stage.waveIndex = waveIndex;
@@ -339,41 +489,55 @@ public final class DungeonRun {
         stage.mobs.clear();
         stage.lastSeen.clear();
         stage.missingSeconds.clear();
+        stage.entities.clear();
+        stage.mobRecovery.clear();
+        stage.spawning = true;
 
-        List<EntityType> types = stage.waves.get(waveIndex);
-        List<String> templates = stage.templates.get(waveIndex);
-        List<Location> spots = stage.spots.get(waveIndex);
-        boolean bossWave = stage.bossStage && waveIndex == stage.waveCount() - 1;
+        try {
+            List<EntityType> types = stage.waves.get(waveIndex);
+            List<String> templates = stage.templates.get(waveIndex);
+            List<Location> spots = stage.spots.get(waveIndex);
+            boolean bossWave = stage.bossStage && waveIndex == stage.waveCount() - 1;
 
-        if (types.isEmpty() && !bossWave) {
-            advanceWave(stage);
-            return;
-        }
-        for (int i = 0; i < types.size(); i++) {
-            Location spot = spots.isEmpty()
-                    ? fallbackSpot(stage)
-                    : spots.get(i % spots.size());
-            Entity entity = world.spawnEntity(spot, types.get(i));
-            if (entity == null) {
-                continue;
+            if (types.isEmpty() && !bossWave) {
+                advanceWave(stage);
+                return;
             }
-            entity.setPersistent(true);
-            String templateId = templates.get(i);
-            if (templateId != null && entity instanceof LivingEntity living) {
-                MobTemplate template = plugin.mobTemplate(templateId);
-                if (template != null) {
-                    template.apply(living);
-                    plugin.tagMob(living, template.id());
+            for (int i = 0; i < types.size(); i++) {
+                Location spot = spots.isEmpty()
+                        ? fallbackSpot(stage)
+                        : spots.get(i % spots.size());
+                keepAt(spot);
+                String templateId = templates.get(i);
+                MobTemplate template = templateId == null ? null : plugin.mobTemplate(templateId);
+                java.util.function.Consumer<LivingEntity> configure = living -> {
+                    if (template != null) {
+                        template.apply(living);
+                        plugin.tagMob(living, template.id());
+                    }
+                };
+                LivingEntity entity = MobSpawner.spawn(world, spot, types.get(i), configure);
+                stage.mobs.add(entity.getUniqueId());
+                stage.entities.put(entity.getUniqueId(), entity);
+                stage.mobRecovery.put(entity.getUniqueId(), new MobRecovery(entity, configure, point -> true));
+                stage.lastSeen.put(entity.getUniqueId(), entity.getLocation().clone());
+            }
+            if (bossWave) {
+                try { spawnBoss(stage); }
+                catch (MobSpawner.Failure e) {
+                    stage.bossKilled = false;
+                    stage.lastBossFailure = e;
+                    plugin.getLogger().warning("首领首次生成失败，进入恢复等待：" + e.getMessage());
+                    FailureDiagnostics.record(plugin, "首领首次生成失败 副本=" + def.name + " 关=" + (stage.index + 1), e.getMessage(), e);
                 }
             }
-            stage.mobs.add(entity.getUniqueId());
-            stage.lastSeen.put(entity.getUniqueId(), spot.clone());
+            announceWave(stage, waveIndex, false);
+            refreshBar();
+        } catch (RuntimeException e) {
+            fail("第 " + (stage.index + 1) + " 关第 " + (waveIndex + 1) + " 波生成失败：" + e.getMessage(), e);
+        } finally {
+            stage.spawning = false;
         }
-        if (bossWave) {
-            spawnBoss(stage);
-        }
-        announceWave(stage, waveIndex, false);
-        refreshBar();
     }
 
     /** 首领区没标刷怪点时，护卫就围在首领位/第一个点旁边。 */
@@ -389,18 +553,25 @@ public final class DungeonRun {
     /** 刷首领（位置来自标记；属性来自 dungeons.yml 的 boss:）。 */
     private void spawnBoss(Stage stage) {
         Location center = def.markers.boss != null ? toLocation(def.markers.boss) : fallbackSpot(stage);
+        keepAt(center);
+        // 首领标记点底下可能是洞 / 悬空（自建副本里标记是手放的）→ 先找一块站得住的地。
+        // 否则它一出来就掉出世界：玩家看到"boss 自己消失了"，插件却收到死亡事件直接结算。
         MobTemplate template = plugin.mobTemplate(def.boss.type.toLowerCase(Locale.ROOT));
         EntityType type = template != null ? template.type() : entityType(def.boss.type);
-        if (type == null) {
-            type = EntityType.ZOMBIE;
-        }
-        Entity entity = world.spawnEntity(center, type);
-        if (!(entity instanceof LivingEntity boss)) {
-            plugin.getLogger().warning("首领刷不出来（" + def.boss.type + "）");
-            stage.bossKilled = true;   // 刷不出来就别卡住玩家
-            return;
-        }
-        boss.setPersistent(true);
+        LivingEntity boss = MobSpawner.spawn(world, center, type, entity -> configureBoss(entity, template));
+        stage.bossEntity = boss;
+        stage.bossId = boss.getUniqueId();
+        stage.bossKilled = false;
+        stage.lastBossFailure = null;
+        stage.mobs.add(boss.getUniqueId());
+        stage.entities.put(boss.getUniqueId(), boss);
+        stage.lastSeen.put(boss.getUniqueId(), boss.getLocation().clone());
+        stage.missingSeconds.remove(boss.getUniqueId());
+        announce("§5[副本]§r §c" + stripColor(def.boss.name) + " §r登场了！");
+        refreshBar();
+    }
+
+    private void configureBoss(LivingEntity boss, MobTemplate template) {
         if (template != null) {
             template.apply(boss);
             plugin.tagMob(boss, template.id());
@@ -409,24 +580,13 @@ public final class DungeonRun {
             boss.setCustomName(def.boss.name);
             boss.setCustomNameVisible(true);
         }
-        AttributeInstance maxHealth = boss.getAttribute(Attribute.GENERIC_MAX_HEALTH);
-        if (maxHealth != null) {
-            maxHealth.setBaseValue(def.boss.health);
-            boss.setHealth(Math.min(def.boss.health, maxHealth.getValue()));
-        }
+        MobHealth.apply(boss, def.boss.health);
         try {
             boss.addPotionEffect(new PotionEffect(PotionEffectType.STRENGTH, Integer.MAX_VALUE, 1, false, false));
             boss.addPotionEffect(new PotionEffect(PotionEffectType.RESISTANCE, Integer.MAX_VALUE, 1, false, false));
         } catch (Throwable ignored) {
             // 药水名不兼容就跳过
         }
-        stage.bossId = boss.getUniqueId();
-        stage.bossKilled = false;
-        stage.mobs.add(boss.getUniqueId());
-        stage.lastSeen.put(boss.getUniqueId(), center.clone());
-        stage.missingSeconds.remove(boss.getUniqueId());
-        announce("§5[副本]§r §c" + stripColor(def.boss.name) + " §r登场了！");
-        refreshBar();
     }
 
     private static String stripColor(String text) {
@@ -437,7 +597,7 @@ public final class DungeonRun {
 
     /** 一波清完后的推进。 */
     private void advanceWave(Stage stage) {
-        if (stage.cleared) {
+        if (closed || failure != null || stage.cleared || stage.spawning || stage.wavePending) {
             return;
         }
         int next = stage.waveIndex + 1;
@@ -446,8 +606,9 @@ public final class DungeonRun {
             stage.pendingWave = next;
             stage.emptySince = System.currentTimeMillis();
             announceWave(stage, next, true);
-            Bukkit.getScheduler().runTaskLater(plugin, () -> {
-                if (stage.cleared || !stage.wavePending || stage.pendingWave != next) {
+            stage.waveTask = Bukkit.getScheduler().runTaskLater(plugin, () -> {
+                stage.waveTask = null;
+                if (closed || failure != null || stage.cleared || !stage.wavePending || stage.pendingWave != next) {
                     return;   // 这一局已经收了或状态变了
                 }
                 spawnWave(stage, next);
@@ -455,14 +616,16 @@ public final class DungeonRun {
             return;
         }
         // 最后一波也清完了：首领区必须"确认击杀首领"
-        if (stage.bossStage && !stage.bossKilled && ensureBossAlive(stage)) {
+        if (stage.bossStage && !stage.bossKilled) {
+            ensureBossAlive(stage);
             return;
         }
         completeStage(stage);
     }
 
     private void completeStage(Stage stage) {
-        if (stage.cleared) {
+        if (closed || failure != null || stage.cleared || !stage.mobs.isEmpty()
+                || (stage.bossStage && !stage.bossKilled)) {
             return;
         }
         stage.cleared = true;
@@ -491,15 +654,66 @@ public final class DungeonRun {
         currentStage = next;
         Stage nextStage = stages.get(next);
         if (nextStage.cleared) {
-            // 下一关也是"没得打"的，继续往下推
-            completeStage(nextStage);
+            advanceToNext(nextStage);
             return;
         }
         if (nextStage.waveCount() == 0) {
             completeStage(nextStage);
             return;
         }
-        spawnWave(nextStage, 0);
+        // 1.5.0-M7：**不再"清完就立刻刷下一关"**。
+        // 以前这行一执行，下一关的怪就出现在几百格外：玩家还在上一关慢慢打/捡东西时，
+        // 那些怪既不在模拟距离内（不 tick，看着不动），区块一卸载又会消失
+        // （插件看成"怪不见了"，首领那条路甚至直接结算）。
+        // 现在只"标记为待开始"，等玩家走进那一关的范围才刷（见 startStagesNearPlayers）。
+        nextStage.started = false;
+        announce("§5[副本]§r §7第 " + (next + 1) + " 关已就绪：走进那一关就会开打。");
+    }
+
+    /**
+     * "走进某一关才开始刷这一关的怪"（1.5.0-M7）。
+     *
+     * <p>改动原因见 {@link Dungeon#Room#started}：以前清完一关就立刻把下一关的怪刷出来，
+     * 玩家慢一点就出现"几百格外的怪不 tick / 被卸载 / 首领自己消失然后直接结算"。
+     */
+    private void startStagesNearPlayers() {
+        for (Stage stage : stages) {
+            if (stage.index != currentStage || stage.cleared || stage.started || stage.waveCount() == 0) {
+                continue;
+            }
+            Location anchor = stageAnchor(stage);
+            if (anchor == null) {
+                continue;
+            }
+            for (Player player : onlinePlayers()) {
+                if (!player.getWorld().equals(world) || player.isDead()
+                        || player.getGameMode() == org.bukkit.GameMode.SPECTATOR) {
+                    continue;
+                }
+                if (player.getLocation().distanceSquared(anchor)
+                        <= STAGE_START_RADIUS * STAGE_START_RADIUS) {
+                    stage.started = true;
+                    plugin.getLogger().info("「" + def.name + "」第 " + (stage.index + 1)
+                            + " 关：玩家已到位（" + player.getName() + "），开始刷怪");
+                    spawnWave(stage, 0);
+                    refreshBar();
+                    break;
+                }
+            }
+        }
+    }
+
+    /** 这一关的"入口锚点"：第一个刷怪点，没有就用关卡门。 */
+    private Location stageAnchor(Stage stage) {
+        for (List<Location> wave : stage.spots) {
+            for (Location spot : wave) {
+                if (spot != null) {
+                    return spot;
+                }
+            }
+        }
+        if (stage.bossStage && def.markers.boss != null) { return toLocation(def.markers.boss); }
+        return stage.index > 0 ? stages.get(stage.index - 1).gate : startLocation();
     }
 
     /**
@@ -508,26 +722,49 @@ public final class DungeonRun {
      * <p>返回 true = 首领"还在"，这一关继续等它被打死。
      */
     private boolean ensureBossAlive(Stage stage) {
-        if (stage.bossId != null) {
-            Entity existing = Bukkit.getEntity(stage.bossId);
-            if (existing instanceof LivingEntity living && !living.isDead() && living.isValid()) {
+        if (closed || failure != null) { return true; }
+        try {
+            LivingEntity living = MobSpawner.find(world, stage.bossId, stage.bossEntity,
+                    stage.bossId == null ? stageAnchor(stage) : stage.lastSeen.get(stage.bossId));
+            if (living != null) {
+                stage.bossEntity = living;
+                stage.bossRecovery.found();
+                stage.lastSeen.put(stage.bossId, living.getLocation().clone());
                 if (!stage.mobs.contains(stage.bossId)) {
                     stage.mobs.add(stage.bossId);
-                    stage.lastSeen.put(stage.bossId, living.getLocation());
+                    stage.entities.put(stage.bossId, living);
                     stage.missingSeconds.remove(stage.bossId);
                     plugin.getLogger().warning("首领房：首领其实还活着（被误剔出名单），已重新纳入追踪");
                 }
                 return true;
             }
+            Location last = stage.bossEntity == null
+                    ? (def.markers.boss == null ? stageAnchor(stage) : toLocation(def.markers.boss))
+                    : stage.bossEntity.getLocation();
+            SpawnRecovery.Decision decision = stage.bossRecovery.missing(System.currentTimeMillis(),
+                    MobSpawner.entitiesReady(last));
+            if (decision == SpawnRecovery.Decision.ABORT) {
+                fail("首领恢复失败，已尝试 " + stage.bossRecovery.attempts() + " 次；最后原因："
+                        + (stage.lastBossFailure == null ? "实体持续失踪" : stage.lastBossFailure.getMessage()), stage.lastBossFailure);
+            } else if (decision == SpawnRecovery.Decision.RETRY) {
+                if (stage.bossId != null) {
+                    stage.mobs.remove(stage.bossId);
+                    stage.entities.remove(stage.bossId);
+                    stage.lastSeen.remove(stage.bossId);
+                }
+                stage.bossRespawns = stage.bossRecovery.attempts();
+                try {
+                    spawnBoss(stage);
+                    plugin.getLogger().warning("首领恢复第 " + stage.bossRespawns + " 次成功；仍需有效击杀");
+                } catch (RuntimeException e) {
+                    stage.lastBossFailure = e;
+                    plugin.getLogger().warning("首领恢复第 " + stage.bossRespawns + " 次失败：" + e.getMessage());
+                    FailureDiagnostics.record(plugin, "首领补刷失败 副本=" + def.name, e.getMessage(), e);
+                }
+            }
+        } catch (RuntimeException e) {
+            fail("加载首领实体失败：" + e.getMessage());
         }
-        if (stage.bossRespawns >= MAX_BOSS_RESPAWNS) {
-            plugin.getLogger().warning("首领房：首领找不回、也补刷不了（已补 " + stage.bossRespawns
-                    + " 次），这一关按通关处理");
-            return false;
-        }
-        stage.bossRespawns++;
-        spawnBoss(stage);
-        plugin.getLogger().warning("首领房：首领不见了，已补刷第 " + stage.bossRespawns + " 只");
         return true;
     }
 
@@ -636,58 +873,35 @@ public final class DungeonRun {
 
     /** 每秒跑一次：关门、清名单、卡死兜底、检查点、首领保险、血条。 */
     public void tick() {
-        if (stages.isEmpty()) {
+        if (closed || failure != null || completed || stages.isEmpty()) {
             return;
         }
         enforceGates();
+        startStagesNearPlayers();   // 走进某一关才开始刷（别提前把几百格外的怪刷出来）
+        if (failure != null) { return; }
         pruneVanishedMobs();
+        if (failure != null) { return; }
+        checkBossStages();   // 首领关单独巡检：找回 / 补刷，别让它静默消失就结算
+        if (failure != null) { return; }
         guardStuckStages();
         tickCheckpoints();
         refreshBar();
     }
 
-    /**
-     * 把"已经不在的怪"剔出名单。
-     *
-     * <p>沿用 v1.4.13 的两条加固：① 只有"**它最后出现的位置**所在区块已加载"时才可能判它消失
-     * （不能只看房间中心）；② 要连续 {@value #MISSING_SECONDS_BEFORE_DROP} 秒都查不到才剔。
-     * 这两条正是"活着的首领被判成已通关"的根源。
-     */
+    /** 先找回已卸载实体，确认缺失后有限恢复；名单不得因失踪而减少。 */
     private void pruneVanishedMobs() {
+        int budget = MobRecovery.MAX_ATTEMPTS_PER_TICK;
         for (Stage stage : stages) {
             if (stage.cleared || stage.mobs.isEmpty()) {
                 continue;
             }
-            boolean changed = false;
-            for (Iterator<UUID> it = stage.mobs.iterator(); it.hasNext(); ) {
-                UUID uuid = it.next();
-                Entity entity = Bukkit.getEntity(uuid);
-                if (entity != null && !entity.isDead() && entity.isValid()) {
-                    stage.lastSeen.put(uuid, entity.getLocation());
-                    stage.missingSeconds.remove(uuid);
-                    continue;
-                }
-                Location seen = stage.lastSeen.get(uuid);
-                if (seen != null && seen.getWorld() != null
-                        && !seen.getWorld().isChunkLoaded(seen.getBlockX() >> 4, seen.getBlockZ() >> 4)) {
-                    stage.missingSeconds.remove(uuid);
-                    continue;
-                }
-                int missing = stage.missingSeconds.merge(uuid, 1, Integer::sum);
-                if (missing < MISSING_SECONDS_BEFORE_DROP) {
-                    continue;
-                }
-                plugin.getLogger().warning("「" + def.name + "」第 " + (stage.index + 1)
-                        + " 关有怪连续 " + missing + " 秒查不到且区块是加载的，按已消失处理（最后位置 "
-                        + (seen == null ? "未知"
-                        : seen.getBlockX() + "," + seen.getBlockY() + "," + seen.getBlockZ()) + "）");
-                it.remove();
-                stage.missingSeconds.remove(uuid);
-                stage.lastSeen.remove(uuid);
-                changed = true;
-            }
-            if (changed && stage.mobs.isEmpty() && !stage.wavePending && !stage.cleared) {
-                advanceWave(stage);
+            try {
+                budget = MobRecovery.tick(plugin, world, "副本「" + def.name + "」第 " + (stage.index + 1)
+                                + " 关 第 " + (stage.waveIndex + 1) + " 波", stage.mobs, stage.bossId,
+                        stage.entities, stage.lastSeen, stage.mobRecovery, budget);
+            } catch (RuntimeException e) {
+                fail("第 " + (stage.index + 1) + " 关的战斗怪物无法恢复：" + e.getMessage(), e);
+                return;
             }
         }
     }
@@ -698,6 +912,9 @@ public final class DungeonRun {
         for (Stage stage : stages) {
             if (stage.cleared) {
                 continue;
+            }
+            if (!stage.started) {
+                continue;   // 还没开始的关卡：没怪也没波次，不参与卡住判定
             }
             if (stage.wavePending) {
                 if (stage.emptySince == 0) {
@@ -711,11 +928,18 @@ public final class DungeonRun {
                     stage.wavePending = false;
                     stage.pendingWave = -1;
                     stage.emptySince = now;
+                    if (stage.waveTask != null) { stage.waveTask.cancel(); stage.waveTask = null; }
                     spawnWave(stage, pending);
                 }
                 continue;
             }
-            if (!stage.mobs.isEmpty()) {
+            if (hasNonBossMob(stage)) {
+                stage.emptySince = 0;
+                continue;
+            }
+            // 只剩首领、而它还没被"确认击杀"：绝不在这里强制推进（否则就是"boss 还在却结算"）。
+            // 它的死活交给 checkBossStages。
+            if (stage.bossStage && !stage.bossKilled) {
                 stage.emptySince = 0;
                 continue;
             }
@@ -727,6 +951,33 @@ public final class DungeonRun {
                 stage.emptySince = now;
                 advanceWave(stage);
             }
+        }
+    }
+
+    /** 这一关还有没有"非首领"的怪要打（首领单独处理，不算在这里）。 */
+    private static boolean hasNonBossMob(Stage stage) {
+        for (UUID id : stage.mobs) {
+            if (stage.bossId == null || !stage.bossId.equals(id)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 首领关的独立巡检：加载并找回 / 有间隔地补刷 / 耗尽后异常结束并退款。
+     *
+     * <p>首领被别的插件清掉、或跟着区块卸载没回来时，既不会有死亡事件，
+     * 也不会被 {@link #guardStuckStages} 推进（那一关被特意排除了）——
+     * 没有这一趟，玩家会被永久卡在首领关。
+     */
+    private void checkBossStages() {
+        for (Stage stage : stages) {
+            if (!stage.bossStage || stage.cleared || !stage.started || stage.bossKilled || stage.wavePending
+                    || stage.waveIndex != stage.waveCount() - 1) {
+                continue;
+            }
+            ensureBossAlive(stage);
         }
     }
 
@@ -784,16 +1035,31 @@ public final class DungeonRun {
     // ---------------------------------------------------------------- 怪物死亡
 
     /** 怪物死亡：推进它所属的那一关。返回 true = 这只怪属于本局。 */
-    public boolean onMobDeath(Entity entity) {
+    public boolean onMobDeath(LivingEntity entity) {
+        if (closed || failure != null || completed) { return false; }
         for (Stage stage : stages) {
             if (stage.mobs.remove(entity.getUniqueId())) {
+                stage.entities.remove(entity.getUniqueId());
+                stage.mobRecovery.remove(entity.getUniqueId());
                 kills++;
                 stage.missingSeconds.remove(entity.getUniqueId());
                 stage.lastSeen.remove(entity.getUniqueId());
                 if (stage.bossId != null && stage.bossId.equals(entity.getUniqueId())) {
-                    stage.bossKilled = true;   // "确认击杀"——只有收到死亡事件才算
+                    // 首领"确认击杀"还要看**死因归属**：被玩家打死（含打进岩浆 / 打落虚空）才算赢；
+                    // 自己掉出世界、被别的插件清掉，不算通关，交给补刷。判定统一在 PlayerHits 里。
+                    boolean byPlayer = PlayerHits.countsAsPlayerKill(entity, players::containsKey);
+                    stage.bossKilled = byPlayer;
+                    if (byPlayer) {
+                        plugin.getLogger().info("首领确认击杀（第 " + (stage.index + 1) + " 关）："
+                                + PlayerHits.describe(entity));
+                    } else {
+                        plugin.getLogger().warning("首领**不算被玩家打死**（第 " + (stage.index + 1)
+                                + " 关）：" + PlayerHits.describe(entity)
+                                + " → 这一关不放行，交给补刷；反复出现请查首领房落脚点");
+                    }
+                    PlayerHits.forget(entity);
                 }
-                if (stage.mobs.isEmpty() && !stage.wavePending && !stage.cleared) {
+                if (stage.mobs.isEmpty() && !stage.wavePending && !stage.cleared && !stage.spawning) {
                     advanceWave(stage);
                 }
                 refreshBar();
@@ -842,20 +1108,9 @@ public final class DungeonRun {
             return;
         }
         if (target.bossStage && target.bossId != null) {
-            Entity entity = Bukkit.getEntity(target.bossId);
-            double max = def.boss.health;
-            double health = 0;
-            if (entity instanceof LivingEntity living) {
-                health = living.getHealth();
-                AttributeInstance attribute = living.getAttribute(Attribute.GENERIC_MAX_HEALTH);
-                if (attribute != null) {
-                    max = attribute.getValue();
-                }
-            }
-            bar.setColor(org.bukkit.boss.BarColor.RED);
-            bar.setTitle("§c" + stripColor(def.boss.name) + " §f" + (int) Math.max(0, health)
-                    + " / " + (int) max);
-            bar.setProgress(max <= 0 ? 0 : Math.max(0, Math.min(1, health / max)));
+            try { MobHealth.updateBar(bar, stripColor(def.boss.name),
+                    MobHealth.forBar(target.bossId, target.bossEntity), def.boss.health); }
+            catch (MobSpawner.Failure e) { fail(e.getMessage(), e); }
             return;
         }
         String wave = target.waveCount() > 1
@@ -937,11 +1192,24 @@ public final class DungeonRun {
     // ---------------------------------------------------------------- 收尾
 
     public void cleanup() {
+        if (closed) { return; }
+        closed = true;
+        if (failure != null) { staminaPaid.forEach((uuid, amount) -> plugin.stamina().refund(uuid, amount)); }
+        staminaPaid.clear();
+        releaseChunks();   // 先撤区块票据，再清怪、卸世界
         if (bar != null) {
             bar.removeAll();
             bar = null;
         }
         for (Stage stage : stages) {
+            if (stage.waveTask != null) { stage.waveTask.cancel(); stage.waveTask = null; }
+            stage.wavePending = false;
+            for (LivingEntity entity : stage.entities.values()) {
+                PlayerHits.forget(entity);
+                if (!entity.isDead()) { entity.remove(); }
+            }
+            stage.entities.clear();
+            stage.mobRecovery.clear();
             for (UUID uuid : stage.mobs) {
                 Entity entity = Bukkit.getEntity(uuid);
                 if (entity != null && !(entity instanceof Player)) {

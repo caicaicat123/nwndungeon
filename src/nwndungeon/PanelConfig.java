@@ -29,7 +29,7 @@ public final class PanelConfig {
         if (!file.exists()) {
             return config;
         }
-        FileConfiguration yaml = YamlConfiguration.loadConfiguration(file);
+        FileConfiguration yaml = SafeYaml.read(file);
         config.enabled = yaml.getBoolean("confirm-panel", true);
         config.title = color(yaml.getString("title", config.title));
         config.header = color(yaml.getString("header", config.header));

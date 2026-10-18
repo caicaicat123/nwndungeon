@@ -45,6 +45,17 @@ public final class DungeonBuilder {
             new int[]{18, 6}, new int[]{18, 12}, new int[]{18, 18});
 
     private final Random random = new Random();
+    private java.util.function.Consumer<Runnable> edits = Runnable::run;
+
+    public record Plan(Dungeon dungeon, List<Runnable> operations) { }
+
+    /** 只生成内存中的方块计划，不在这一轮访问或修改世界。 */
+    public Plan plan(World world, int ox, int oy, int oz, Tier tier) {
+        List<Runnable> operations = new ArrayList<>();
+        edits = operations::add;
+        try { return new Plan(build(world, ox, oy, oz, tier), operations); }
+        finally { edits = Runnable::run; }
+    }
 
     public Dungeon build(World world, int ox, int oy, int oz, Tier tier) {
         Dungeon dungeon = new Dungeon();
@@ -65,13 +76,18 @@ public final class DungeonBuilder {
 
         for (int i = 1; i < total; i++) {
             Dungeon.Room room = dungeon.rooms.get(i);
-            room.waves = parseWaves(specs.get(i));
+            room.waves = parseWaves(specs.get(i), room.bossRoom);
             room.displayIndex = i;          // 大厅(0) 没怪不编号，第 1 间有怪的房间就是"第 1 间"
             if (room.waves.isEmpty()) {
                 room.cleared = true;    // 没配阵容的房间直接当已清，别卡住流程
                 continue;
             }
-            spawnWave(world, room, 0, tier);   // 进本只刷第一波
+            // 1.5.0-M7：**不在这里刷怪了**。
+            // 以前建房时把每一间房的第一波全刷出来（注释写"进本只刷第一波"，但它在循环里），
+            // 10 间房的副本里最远那间离玩家几百格 → 不在模拟距离内（不 tick）、
+            // 区块一卸载就被卸载 → 插件看成"怪不见了/首领自己消失" → 甚至直接结算。
+            // 现在改成"玩家走进这一间才开始刷"（见 Instances#startRoomsNearPlayers）。
+            room.started = false;
         }
 
         dungeon.spawn = new Location(world, ox + ROOM / 2.0 + 0.5, oy + 1, oz + ROOM / 2.0 + 0.5, 90f, 0f);
@@ -162,13 +178,16 @@ public final class DungeonBuilder {
             hangingLantern(world, px, ceil, pz - 2);
             dungeon.checkpoints.add(new Location(world, px + 0.5, oy + 1, pz + 0.5));
             set(world, px, oy + 1, pz - 3, Material.OAK_SIGN);
+            int checkpointNumber = dungeon.checkpoints.size();
+            edits.accept(() -> {
             Block signBlock = world.getBlockAt(px, oy + 1, pz - 3);
             if (signBlock.getState() instanceof Sign sign) {
-                sign.setLine(0, "§b检查点 " + dungeon.checkpoints.size());
+                sign.setLine(0, "§b检查点 " + checkpointNumber);
                 sign.setLine(1, index == 0 ? "§7入口大厅" : "§7第 " + index + " 间");
                 sign.setLine(2, "§7死亡后回到这里");
                 sign.update(true, false);
             }
+            });
         }
 
         if (!first) {
@@ -213,7 +232,7 @@ public final class DungeonBuilder {
         set(world, x2, oy + 3, cz, brick());
         // 走廊是东西向的，门必须朝东/朝西（门板与通道同轴）。朝向写错（例如 NORTH）时
         // 门板会横卡在门框里，贴着门框边缘就能蹭过去——旧版"铁门像自动开着"就是这个原因。
-        placeIronDoor(world, x2, oy + 1, cz, BlockFace.EAST);
+        edits.accept(() -> placeIronDoor(world, x2, oy + 1, cz, BlockFace.EAST));
         room.doorLower = new Location(world, x2, oy + 1, cz);
         // 门旁那格换成凿制石砖当门柱（纯装饰）；清场后把压力板铺在门前的地板上（踩上去就给门通电）
         set(world, x2, oy + 1, cz + 1, Material.CHISELED_STONE_BRICKS);
@@ -230,31 +249,38 @@ public final class DungeonBuilder {
         }
         for (String token : spec.split(",")) {
             String[] parts = token.trim().split(":");
-            if (parts.length < 2) {
-                continue;
+            if (parts.length != 2) {
+                throw new MobSpawner.Failure("阵容必须写成 怪物:数量：" + token);
             }
             try {
                 EntityType type = EntityType.valueOf(parts[0].trim().toUpperCase(Locale.ROOT));
                 int count = Math.max(0, Integer.parseInt(parts[1].trim()));
+                if (!MobSpawner.supported(type) || count <= 0 || count > MobSpawner.MAX_WAVE_SIZE
+                        || types.size() + count > MobSpawner.MAX_WAVE_SIZE) {
+                    throw new MobSpawner.Failure("无效的怪物类型或数量：" + token);
+                }
                 for (int n = 0; n < count; n++) {
                     types.add(type);
                 }
-            } catch (Exception ignored) {
-                // 配置写错就跳过这一项
+            } catch (Exception e) {
+                throw new MobSpawner.Failure("阵容配置错误：" + token, e);
             }
         }
         return types;
     }
 
-    private static List<List<EntityType>> parseWaves(List<String> specs) {
+    private static List<List<EntityType>> parseWaves(List<String> specs, boolean bossRoom) {
         List<List<EntityType>> waves = new ArrayList<>();
         if (specs == null) {
             return waves;
         }
-        for (String spec : specs) {
+        for (int i = 0; i < specs.size(); i++) {
+            String spec = specs.get(i);
             List<EntityType> types = parseSpec(spec);
-            if (!types.isEmpty()) {
+            if (!types.isEmpty() || (bossRoom && i == specs.size() - 1)) {
                 waves.add(types);
+            } else {
+                throw new MobSpawner.Failure("普通战斗波不能是空阵容：" + spec);
             }
         }
         return waves;
@@ -276,27 +302,65 @@ public final class DungeonBuilder {
         room.mobs.clear();
         room.lastSeen.clear();
         room.missingSeconds.clear();
+        room.entities.clear();
+        room.mobRecovery.clear();
+        room.spawning = true;
         int rx = room.origin.getBlockX();
         int oy = room.origin.getBlockY();
         int oz = room.origin.getBlockZ();
         int placed = 0;
-        for (EntityType type : room.waves.get(waveIndex)) {
-            int[] spot = SPOTS.get(placed % SPOTS.size());
-            Location location = new Location(world,
-                    rx + spot[0] + 0.5, oy + 1, oz + spot[1] + 0.5);
-            Entity entity = world.spawnEntity(location, type);
-            if (entity != null) {
-                entity.setPersistent(true);
-                room.mobs.add(entity.getUniqueId());
-                // 记下"最后一次见到它"的位置：查不到实体时用它判断区块加载没加载
-                room.lastSeen.put(entity.getUniqueId(), location.clone());
+        try {
+            for (EntityType type : room.waves.get(waveIndex)) {
+                int[] spot = SPOTS.get(placed % SPOTS.size());
+                Location location = new Location(world,
+                        rx + spot[0] + 0.5, oy + 1, oz + spot[1] + 0.5);
+                LivingEntity entity = MobSpawner.spawn(world, location, type, null,
+                        point -> insideRoom(room, point));
+                if (entity != null) {
+                    room.mobs.add(entity.getUniqueId());
+                    room.entities.put(entity.getUniqueId(), entity);
+                    room.mobRecovery.put(entity.getUniqueId(), new MobRecovery(entity, null,
+                            point -> insideRoom(room, point)));
+                    // 记下"最后一次见到它"的位置：查不到实体时用它判断区块加载没加载
+                    room.lastSeen.put(entity.getUniqueId(), entity.getLocation().clone());
+                }
+                placed++;
             }
-            placed++;
+            if (room.bossRoom && waveIndex == room.waves.size() - 1) {
+                try { spawnBoss(world, room, tier); }
+                catch (MobSpawner.Failure e) {
+                    // 首次生成也进入统一的等待/恢复预算；绝不能设置 bossKilled。
+                    room.bossKilled = false;
+                    room.lastBossFailure = e;
+                }
+            }
+            room.initialMobs = room.mobs.size();
+        } finally {
+            room.spawning = false;
         }
-        if (room.bossRoom && waveIndex == room.waves.size() - 1) {
-            spawnBoss(world, room, tier);
-        }
-        room.initialMobs = room.mobs.size();
+    }
+
+    private static boolean insideRoom(Dungeon.Room room, Location point) {
+        return point.getX() >= room.origin.getBlockX() + 2
+                && point.getX() < room.origin.getBlockX() + ROOM - 2
+                && point.getZ() >= room.origin.getBlockZ() + 2
+                && point.getZ() < room.origin.getBlockZ() + ROOM - 2
+                && point.getY() >= room.origin.getBlockY() + 1
+                && point.getY() < room.origin.getBlockY() + HEIGHT;
+    }
+
+    /**
+     * 给首领找一块"能站住"的地。
+     *
+     * <p>为什么要这一步：首领是按房间中心刷的，而程序生成的房间里中心可能是**洞、悬空、或者方块里**。
+     * 直接刷进去，它一出来就掉出世界或窒息 —— 玩家看到的就是"boss 自己消失了"，
+     * 而插件那边收到的是"首领死了"，于是直接进结算（这就是玩家报的那个 bug）。
+     *
+     * <p>M8：仅用于两格高的诊断实体；限定邻近范围，不铺台、不改建筑。
+     * 实际生成使用 MobSpawner，根据真实实体体型检查。
+     */
+    public static Location safeSpawnSpot(World world, Location at) {
+        return MobSpawner.findSafeSpot(world, at, 0.6, 2.0, point -> true);
     }
 
     /**
@@ -306,29 +370,30 @@ public final class DungeonBuilder {
     public static void spawnBoss(World world, Dungeon.Room room, Tier tier) {
         Location center = room.center != null ? room.center
                 : room.origin.clone().add(ROOM / 2.0 + 0.5, 1, ROOM / 2.0 + 0.5);
+        // 先给它找一块"能站住"的地 —— 直接往 room.center 刷，遇到房间中央是洞/悬空时，
+        // 首领一出来就掉出世界（玩家看到的就是"boss 自己消失了"）。
         EntityType type;
         try {
             type = EntityType.valueOf(tier.bossType());
         } catch (Exception e) {
-            type = EntityType.ZOMBIE;
+            throw new MobSpawner.Failure("首领类型错误：" + tier.bossType(), e);
         }
-        Entity entity = world.spawnEntity(center, type);
-        if (!(entity instanceof LivingEntity boss)) {
-            return;
-        }
-        boss.setPersistent(true);
+        LivingEntity boss = MobSpawner.spawn(world, center, type, entity -> configureBoss(entity, tier),
+                point -> insideRoom(room, point));
         room.bossKilled = false;
+        room.lastBossFailure = null;
+        room.bossEntity = boss;
+        room.bossId = boss.getUniqueId();
+        room.mobs.add(boss.getUniqueId());
+        room.entities.put(boss.getUniqueId(), boss);
+        room.lastSeen.put(boss.getUniqueId(), boss.getLocation().clone());
+        room.missingSeconds.remove(boss.getUniqueId());
+    }
+
+    private static void configureBoss(LivingEntity boss, Tier tier) {
         boss.setCustomName(tier.bossName());
         boss.setCustomNameVisible(true);
-        try {
-            AttributeInstance attribute = boss.getAttribute(Attribute.GENERIC_MAX_HEALTH);
-            if (attribute != null) {
-                attribute.setBaseValue(tier.bossHealth());
-                boss.setHealth(tier.bossHealth());
-            }
-        } catch (Throwable ignored) {
-            // 不同版本属性名可能不同，失败就用原版血量
-        }
+        MobHealth.apply(boss, tier.bossHealth());
         if (boss.getEquipment() != null) {
             boss.getEquipment().setItemInMainHand(new ItemStack(Material.DIAMOND_SWORD));
             boss.getEquipment().setHelmet(new ItemStack(Material.DIAMOND_HELMET));
@@ -340,10 +405,6 @@ public final class DungeonBuilder {
         } catch (Throwable ignored) {
             // 药水名不兼容就跳过
         }
-        room.bossId = boss.getUniqueId();
-        room.mobs.add(boss.getUniqueId());
-        room.lastSeen.put(boss.getUniqueId(), center.clone());
-        room.missingSeconds.remove(boss.getUniqueId());
     }
 
     // ---------------------------------------------------------------- 工具
@@ -442,15 +503,17 @@ public final class DungeonBuilder {
     private void hangingLantern(World world, int x, int ceil, int z) {
         set(world, x, ceil - 1, z, Material.CHAIN);
         set(world, x, ceil - 2, z, Material.CHAIN);
+        edits.accept(() -> {
         Block lamp = world.getBlockAt(x, ceil - 3, z);
         lamp.setType(Material.LANTERN, false);
         if (lamp.getBlockData() instanceof Lantern lantern) {
             lantern.setHanging(true);
             lamp.setBlockData(lantern, false);
         }
+        });
     }
 
     private void set(World world, int x, int y, int z, Material material) {
-        world.getBlockAt(x, y, z).setType(material, false);
+        edits.accept(() -> world.getBlockAt(x, y, z).setType(material, false));
     }
 }

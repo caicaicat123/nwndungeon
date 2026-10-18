@@ -22,7 +22,9 @@ generation:
     - ANDESITE
     - DIORITE
     - GRANITE
-  # 难度权重：铁 60%、金 30%、钻 10%
+  # 先按上面的 1/chance 抽中生成，再按 权重/当前候选总权重 选择入口。
+  # 下面 60+30+10=100，所以钻级占 10/100=10%；总权重变成 110 后就是 10/110。
+  # 自建副本也参与此权重池；weight: 10 不代表固定 10%。
   difficulty-weights:
     iron: 60
     gold: 30
@@ -45,6 +47,13 @@ stamina:
   enabled: true
   max: 500
   regen-ticks: 3456
+
+# 低配服务器优先：内置和自建副本共享名额，准备中的副本也占名额。
+performance:
+  max-active-runs: 2                 # 同时最多 2 局；开本准备始终串行
+  build-operations-per-tick: 2048    # 每 tick 最多处理的内置建造/清理操作数
+  build-budget-ms: 2                # 达到此时间预算就暂停，下一 tick 继续
+  # 单次 Bukkit 操作无法中断；区块提前异步加载，避免集中同步生成新区块。
 
 instance:
   world: nwndungeon

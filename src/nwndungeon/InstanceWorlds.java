@@ -31,6 +31,9 @@ public final class InstanceWorlds {
     private final DungeonRegistry registry;
     private final Editor editor;
     private final Map<String, DungeonRun> runs = new LinkedHashMap<>();
+    // 仅主线程读写；异步复制开始前就预占，避免重复点击共用同一个世界文件夹。
+    private final Map<String, String> opening = new LinkedHashMap<>();
+    private final Map<String, List<UUID>> openingParties = new LinkedHashMap<>();
 
     public InstanceWorlds(NWNDungeon plugin, WorldStore store, DungeonRegistry registry, Editor editor) {
         this.plugin = plugin;
@@ -63,6 +66,18 @@ public final class InstanceWorlds {
         return runs.size();
     }
 
+    public int reservedCount() { return runs.size() + opening.size(); }
+    public boolean opening() { return !opening.isEmpty(); }
+
+    public boolean isJoining(UUID uuid) {
+        return openingParties.values().stream().anyMatch(party -> party.contains(uuid));
+    }
+
+    private void finishOpening(String worldName) {
+        opening.remove(worldName);
+        openingParties.remove(worldName);
+    }
+
     public List<DungeonRun> all() {
         return new ArrayList<>(runs.values());
     }
@@ -83,6 +98,14 @@ public final class InstanceWorlds {
         if (def == null || players.isEmpty()) {
             return;
         }
+        if (!plugin.canReserveRun() || plugin.preparingRun()) {
+            message(players, "§c副本名额已满或正在准备另一局，请稍后再来。本次未扣体力。");
+            return;
+        }
+        if (players.stream().anyMatch(player -> plugin.playerBusy(player.getUniqueId()))) {
+            message(players, "§c队伍中有人已经在副本中，或正在进入另一局，请稍后重试。");
+            return;
+        }
         if (!def.worldEnabled) {
             message(players, "§c「" + def.name + "」现在是关闭状态（world.enabled: false）。");
             return;
@@ -97,6 +120,7 @@ public final class InstanceWorlds {
             plugin.getLogger().warning("开本前校验（" + def.name + "）：" + problem);
         }
         int active = 0;
+        active += (int) opening.values().stream().filter(def.name::equals).count();
         for (DungeonRun run : runs.values()) {
             if (run.def().name.equals(def.name)) {
                 active++;
@@ -132,16 +156,35 @@ public final class InstanceWorlds {
         for (Player player : players) {
             party.add(player.getUniqueId());
         }
+        opening.put(worldName, def.name);
+        openingParties.put(worldName, party);
         message(players, "§7正在复制副本世界…");
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
             try {
                 store.copyFolder(template, folder);
             } catch (Exception e) {
                 plugin.getLogger().warning("复制模板失败：" + e);
-                Bukkit.getScheduler().runTask(plugin, () -> message(players, "§c复制副本世界失败，看控制台。"));
+                Bukkit.getScheduler().runTask(plugin, () -> {
+                    finishOpening(worldName);
+                    if (!WorldStore.deleteFolder(folder)) { plugin.addPendingDelete(folder); }
+                    message(players, "§c复制副本世界失败，看控制台。");
+                });
                 return;
             }
-            Bukkit.getScheduler().runTask(plugin, () -> enter(def, worldName, party, manualHold, cost));
+            Bukkit.getScheduler().runTask(plugin, () -> {
+                finishOpening(worldName);
+                try { enter(def, worldName, party, manualHold, cost); }
+                catch (RuntimeException e) {
+                    DungeonRun run = runs.get(worldName);
+                    if (run != null) {
+                        run.fail("开局失败：" + e.getMessage());
+                        release(run, "§c副本生成失败，已扣体力已退还。");
+                    } else {
+                        plugin.getLogger().severe("副本世界开局失败：" + e);
+                        messageByIds(party, "§c副本世界开局失败，本次未扣体力。");
+                    }
+                }
+            });
         });
     }
 
@@ -155,7 +198,7 @@ public final class InstanceWorlds {
     private int nextIndex(String slug) {
         for (int i = 1; i < 10_000; i++) {
             String worldName = Names.instanceWorld(slug, i);
-            if (!runs.containsKey(worldName) && !store.folderOf(worldName).exists()) {
+            if (!runs.containsKey(worldName) && !opening.containsKey(worldName) && !store.folderOf(worldName).exists()) {
                 return i;
             }
         }
@@ -164,6 +207,18 @@ public final class InstanceWorlds {
 
     /** 回主线程：建世界、送人、开跑。 */
     private void enter(DungeonDef def, String worldName, List<UUID> party, boolean manualHold, int cost) {
+        int actualCost = plugin.stamina().enabled() ? cost : 0;
+        for (UUID uuid : party) {
+            Player player = Bukkit.getPlayer(uuid);
+            if (player != null && player.isOnline()
+                    && (plugin.playerBusy(uuid) || (actualCost > 0 && plugin.stamina().current(player) < actualCost))) {
+                messageByIds(party, "§c进入条件已变化，本次进入取消，没有扣除体力。");
+                if (!WorldStore.deleteFolder(store.folderOf(worldName))) {
+                    plugin.addPendingDelete(store.folderOf(worldName));
+                }
+                return;
+            }
+        }
         World world = store.create(worldName, def.generator, false, true);
         if (world == null) {
             plugin.getLogger().warning("实例世界创建失败：" + worldName);
@@ -181,20 +236,35 @@ public final class InstanceWorlds {
             if (player == null || !player.isOnline()) {
                 continue;
             }
-            if (cost > 0 && !plugin.stamina().spend(player, cost)) {
-                player.sendMessage("§5[副本]§r §c体力不足，本次没扣（需要 " + cost + " 点）。");
+            if (actualCost > 0 && !plugin.stamina().spend(player, actualCost)) {
+                player.sendMessage("§5[副本]§r §c体力不足，本次没扣（需要 " + actualCost + " 点）。");
+                continue;
             }
+            run.paid(uuid, actualCost);
             run.track(player);
             if (def.forceAdventure) {
                 player.setGameMode(GameMode.ADVENTURE);
             }
-            player.teleport(run.startLocation());
+            if (!player.teleport(run.startLocation())) {
+                run.fail("进本传送被取消");
+                release(run, "§c进入副本失败，本次已扣体力已退还。");
+                return;
+            }
             player.sendMessage("§5[副本]§r 进入「" + def.coloredDisplay() + "§r」，限时 "
                     + def.timeLimitMinutes + " 分钟。");
             player.sendMessage("§7随时可以 §f/dungeon leave§7 离开；死亡会回到最近的检查点。");
             player.sendMessage("§7体力：" + plugin.stamina().describe(player));
         }
-        run.begin();
+        if (run.playerCount() == 0) {
+            release(run, "进入取消：没有可进入的玩家。");
+            return;
+        }
+        try { run.begin(); }
+        catch (RuntimeException e) { run.fail("初始化失败：" + e.getMessage()); }
+        if (run.failure() != null) {
+            release(run, "§c副本生成异常，本局结束，已扣体力已退还；本局未通关。");
+            return;
+        }
         plugin.getLogger().info("副本开局：" + def.name + " → " + worldName
                 + "（" + party.size() + " 人" + (manualHold ? "，管理员自测" : "") + "）");
     }
@@ -220,6 +290,7 @@ public final class InstanceWorlds {
     // ---------------------------------------------------------------- 收一局
 
     public void release(DungeonRun run, String reason) {
+        if (run.failure() != null) { reason += " §7原因：" + Instances.failureText(run.failure()); }
         if (run == null || !runs.containsKey(run.world().getName())) {
             return;
         }
@@ -240,7 +311,11 @@ public final class InstanceWorlds {
         }
         run.cleanup();
         File folder = run.world().getWorldFolder();
-        store.unload(run.world(), false);
+        if (!store.unload(run.world(), false)) {
+            plugin.addPendingDelete(folder);
+            plugin.getLogger().severe("实例世界仍在加载，保留目录，禁止删除：" + folder.getName());
+            return;
+        }
         if (!WorldStore.deleteFolder(folder)) {
             plugin.addPendingDelete(folder);
             plugin.getLogger().warning("实例世界删不掉，已记进待删清单：" + folder.getName());
@@ -319,6 +394,10 @@ public final class InstanceWorlds {
     public void tick() {
         long now = System.currentTimeMillis();
         for (DungeonRun run : new ArrayList<>(runs.values())) {
+            if (run.failure() != null) {
+                release(run, "§c副本生成异常，本局结束，已扣体力已退还；本局未通关。");
+                continue;
+            }
             if (now > run.deadline) {
                 release(run, "时间到，副本结束。");
                 continue;
@@ -333,7 +412,11 @@ public final class InstanceWorlds {
             }
             if (anyoneInside) {
                 run.emptySince = 0;
-                run.tick();
+                try { run.tick(); }
+                catch (RuntimeException e) { run.fail("战斗更新失败：" + e.getMessage()); }
+                if (run.failure() != null) {
+                    release(run, "§c副本生成异常，本局结束，已扣体力已退还；本局未通关。");
+                }
                 continue;
             }
             if (run.emptySince == 0) {

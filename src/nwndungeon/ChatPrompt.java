@@ -64,7 +64,13 @@ public final class ChatPrompt {
             player.sendMessage("§7已取消。");
             return true;
         }
-        Bukkit.getScheduler().runTask(plugin, () -> handler.accept(player, text));
+        Bukkit.getScheduler().runTask(plugin, () -> {
+            try { handler.accept(player, text); }
+            catch (SafeYaml.Problem failure) {
+                player.sendMessage("§c配置操作未保存：" + failure.getMessage());
+                plugin.getLogger().warning(failure.getMessage());
+            }
+        });
         return true;
     }
 }

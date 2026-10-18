@@ -52,14 +52,12 @@ public final class Instances {
 
     /** 一波清完到下一波刷出的间隔（tick）。 */
     private static final long WAVE_DELAY_TICKS = 60L;
-    /** 在"已加载的区块里"连续查不到这么多秒，才允许把这支怪从名单剔除（1.4.13）。 */
-    private static final int MISSING_SECONDS_BEFORE_DROP = 5;
     /** 名单空着超过这么久还没推进 → 判定卡死，强制推进（1.4.13）。 */
     private static final long STUCK_ROOM_MS = 10_000L;
+    /** 走进房间的判定边距（房间 25 格、间距 40 格，8 格边距不会误触隔壁）。 */
+    private static final int ROOM_START_MARGIN = 8;
     /** 等下一波的时间远超 3 秒（说明刷怪任务没跑成）→ 强制重刷（1.4.13）。 */
     private static final long STUCK_WAVE_MS = 15_000L;
-    /** 首领补刷上限，防止无限补刷（1.4.13）。 */
-    private static final int MAX_BOSS_RESPAWNS = 3;
 
     public static final class Slot {
         public final int index;
@@ -68,6 +66,7 @@ public final class Instances {
         public final Map<UUID, Location> checkpointOf = new HashMap<>();
         public final Map<UUID, GameMode> modeOf = new HashMap<>();
         public String tier = "iron";
+        public Tier settings;
         public Location spawn;
         public long deadline;
         public long startedAt;
@@ -79,8 +78,17 @@ public final class Instances {
         public Location lastPasteMin;
         public Location lastPasteMax;
         public boolean busy;
+        public boolean preparing;
+        public String preparationPhase = "";
+        private Object buildToken;
+        private org.bukkit.scheduler.BukkitTask buildTask;
+        private final java.util.Set<Long> preparationChunks = new java.util.HashSet<>();
+        private Location dirtyMin;
+        private Location dirtyMax;
         public boolean manualHold;
         public Dungeon dungeon;
+        public String failure;
+        public final Map<UUID, Integer> staminaPaid = new HashMap<>();
         public BossBar bar;
         /** 进行中给这个槽位挂的区块票据范围（区块坐标，闭区间）；没挂时 ticketed=false。 */
         public boolean ticketed;
@@ -207,35 +215,110 @@ public final class Instances {
         return slots.get(index);
     }
 
-    /** 分配空槽位并现场生成副本；没有空位返回 null。 */
-    public Slot allocate(String tierId, List<Player> party) {
-        if (!ready()) {
-            return null;
+    public Slot byBoss(java.util.UUID uuid) {
+        for (Slot slot : slots.values()) {
+            if (slot.busy && slot.dungeon != null && slot.dungeon.rooms.stream().anyMatch(room -> uuid.equals(room.bossId))) {
+                return slot;
+            }
         }
+        return null;
+    }
+
+    public int reservedCount() {
+        return (int) slots.values().stream().filter(slot -> slot.busy).count();
+    }
+
+    public boolean preparing() { return slots.values().stream().anyMatch(slot -> slot.preparing); }
+
+    /** 先占位和预加载区块，再分 tick 建造；回调前不得扣体力或传送玩家。 */
+    public boolean allocate(String tierId, List<Player> party, java.util.function.Consumer<Slot> ready,
+                            java.util.function.Consumer<String> failed) {
+        if (!ready() || plugin.preparingRun() || !plugin.canReserveRun()) { return false; }
         Tier tier = plugin.tier(tierId);
-        if (tier == null) {
-            return null;
-        }
+        if (tier == null) { return false; }
         for (Slot slot : slots.values()) {
             if (slot.busy) {
                 continue;
             }
             slot.busy = true;
+            slot.preparing = true;
+            slot.preparationPhase = "预加载区块";
+            Object token = new Object();
+            slot.buildToken = token;
+            slot.failure = null;
+            slot.staminaPaid.clear();
             slot.manualHold = false;
             slot.tier = tierId;
+            slot.settings = tier;
             slot.entranceOf.clear();
             slot.checkpointOf.clear();
             slot.modeOf.clear();
             slot.deaths.clear();
             slot.kills = 0;
             slot.lastReward = new ArrayList<>();
-            clearRegion(slot.lastPasteMin, slot.lastPasteMax);
-            clear(slot);
-            slot.lastPasteMin = null;
-            slot.lastPasteMax = null;
+            for (Player player : party) { slot.entranceOf.put(player.getUniqueId(), player.getLocation()); }
+            DungeonBuilder.Plan plan;
+            try {
+                plan = new DungeonBuilder().plan(
+                        world, slot.origin.getBlockX(), slot.origin.getBlockY(), slot.origin.getBlockZ(), tier);
+            } catch (RuntimeException e) {
+                abortPreparation(slot, token, failed, e.getMessage());
+                return true;
+            }
+            List<java.util.Iterator<Runnable>> parts = new ArrayList<>();
+            if (slot.lastPasteMin != null && slot.lastPasteMax != null) {
+                parts.add(clearOperations(slot.lastPasteMin, slot.lastPasteMax));
+            }
+            Location min = slot.dirtyMin != null ? slot.dirtyMin : slot.origin.clone().add(-16, -3, -16);
+            Location max = slot.dirtyMax != null ? slot.dirtyMax
+                    : slot.origin.clone().add(10 * DungeonBuilder.PITCH + 60, 16, DungeonBuilder.ROOM + 20);
+            parts.add(clearOperations(min, max));
+            parts.add(plan.operations().iterator());
+            // 准备中途取消时，新建部分也必须留在下次清理范围内。
+            slot.dirtyMin = new Location(world, Math.min(min.getBlockX(), slot.origin.getBlockX()),
+                    Math.min(min.getBlockY(), slot.origin.getBlockY()), Math.min(min.getBlockZ(), slot.origin.getBlockZ()));
+            slot.dirtyMax = new Location(world, Math.max(max.getBlockX(), slot.origin.getBlockX()
+                    + (plan.dungeon().rooms.size() - 1) * DungeonBuilder.PITCH + DungeonBuilder.ROOM - 1),
+                    Math.max(max.getBlockY(), slot.origin.getBlockY() + DungeonBuilder.HEIGHT),
+                    Math.max(max.getBlockZ(), slot.origin.getBlockZ() + DungeonBuilder.ROOM - 1));
+            java.util.Iterator<Runnable> work = new java.util.Iterator<>() {
+                int part;
+                public boolean hasNext() {
+                    while (part < parts.size() && !parts.get(part).hasNext()) { part++; }
+                    return part < parts.size();
+                }
+                public Runnable next() {
+                    if (!hasNext()) { throw new java.util.NoSuchElementException(); }
+                    return parts.get(part).next();
+                }
+            };
+            TickBudget budget = new TickBudget(work);
+            long started = System.nanoTime();
+            List<Long> chunks = preparationChunks(slot, plan.dungeon(), min, max);
+            try { preload(slot, token, chunks.iterator(), () -> {
+                slot.preparationPhase = "清理与建造";
+                slot.buildTask = Bukkit.getScheduler().runTaskTimer(plugin, () -> {
+                    if (!slot.busy || slot.buildToken != token) { return; }
+                    try {
+                        if (!budget.step(plugin.buildOperationsPerTick(), plugin.buildNanosPerTick())) { return; }
+                        slot.buildTask.cancel();
+                        slot.buildTask = null;
+                        finishAllocation(slot, tier, party, plan.dungeon());
+                        plugin.getLogger().info("内置副本建造完成 #" + slot.index + "：" + budget.operations()
+                                + " 次操作，最长批次 " + (budget.maximumNanos() / 1_000_000.0)
+                                + " ms，总计 " + ((System.nanoTime() - started) / 1_000_000.0)
+                                + " ms，首领血量=" + tier.bossHealth());
+                        ready.accept(slot);
+                    } catch (RuntimeException e) { abortPreparation(slot, token, failed, e.getMessage()); }
+                }, 1L, 1L);
+            }, failed); }
+            catch (RuntimeException e) { abortPreparation(slot, token, failed, e.getMessage()); }
+            return true;
+        }
+        return false;
+    }
 
-            Dungeon dungeon = new DungeonBuilder().build(
-                    world, slot.origin.getBlockX(), slot.origin.getBlockY(), slot.origin.getBlockZ(), tier);
+    private void finishAllocation(Slot slot, Tier tier, List<Player> party, Dungeon dungeon) {
             slot.dungeon = dungeon;
             slot.spawn = dungeon.spawn;
             slot.startedAt = System.currentTimeMillis();
@@ -256,7 +339,7 @@ public final class Instances {
             slot.bar = bar;
 
             for (Player player : party) {
-                slot.entranceOf.put(player.getUniqueId(), player.getLocation());
+                if (!player.isOnline()) { continue; }
                 slot.checkpointOf.put(player.getUniqueId(), dungeon.spawn);
                 bar.addPlayer(player);
             }
@@ -267,9 +350,99 @@ public final class Instances {
             grantRewards(slot, hall);
             refreshBar(slot);
             applyChunkTickets(slot);
-            return slot;
+            dropPreparationChunks(slot);
+            slot.lastPasteMin = null;
+            slot.lastPasteMax = null;
+            slot.dirtyMin = slot.origin.clone();
+            slot.dirtyMax = slot.origin.clone().add((dungeon.rooms.size() - 1) * DungeonBuilder.PITCH
+                    + DungeonBuilder.ROOM - 1, DungeonBuilder.HEIGHT, DungeonBuilder.ROOM - 1);
+            slot.preparing = false;
+            slot.preparationPhase = "";
+    }
+
+    private java.util.Iterator<Runnable> clearOperations(Location min, Location max) {
+        // next()/run() 成对使用，复用同一个游标，避免每次开本分配近六十万个闭包。
+        class Cursor implements java.util.Iterator<Runnable>, Runnable {
+            int x = min.getBlockX(), z = min.getBlockZ(), y = min.getBlockY();
+            int bx, by, bz;
+            public boolean hasNext() { return x <= max.getBlockX(); }
+            public Runnable next() {
+                if (!hasNext()) { throw new java.util.NoSuchElementException(); }
+                bx = x; by = y; bz = z;
+                if (++y > max.getBlockY()) {
+                    y = min.getBlockY();
+                    if (++z > max.getBlockZ()) { z = min.getBlockZ(); x++; }
+                }
+                return this;
+            }
+            public void run() {
+                // 不为清理一片从未建造过的虚空生成新区块。
+                if (!world.isChunkLoaded(bx >> 4, bz >> 4)) { return; }
+                Block block = world.getBlockAt(bx, by, bz);
+                if (!block.getType().isAir()) { block.setType(Material.AIR, false); }
+            }
         }
-        return null;
+        return new Cursor();
+    }
+
+    private List<Long> preparationChunks(Slot slot, Dungeon dungeon, Location dirtyMin, Location dirtyMax) {
+        java.util.Set<Long> chunks = new java.util.LinkedHashSet<>();
+        int minX = slot.origin.getBlockX() - 16;
+        int maxX = slot.origin.getBlockX() + 10 * DungeonBuilder.PITCH + 60;
+        int minZ = slot.origin.getBlockZ() - 16;
+        int maxZ = slot.origin.getBlockZ() + DungeonBuilder.ROOM + 20;
+        for (int x = dirtyMin.getBlockX() >> 4; x <= dirtyMax.getBlockX() >> 4; x++) {
+            for (int z = dirtyMin.getBlockZ() >> 4; z <= dirtyMax.getBlockZ() >> 4; z++) {
+                if (world.isChunkGenerated(x, z)) { chunks.add(chunkKey(x, z)); }
+            }
+        }
+        // 与战斗阶段票据范围一致，建造期间也保持加载。
+        int end = slot.origin.getBlockX() + (dungeon.rooms.size() - 1) * DungeonBuilder.PITCH + DungeonBuilder.ROOM;
+        for (int x = minX >> 4; x <= (end + 16) >> 4; x++) {
+            for (int z = minZ >> 4; z <= maxZ >> 4; z++) { chunks.add(chunkKey(x, z)); }
+        }
+        return new ArrayList<>(chunks);
+    }
+
+    private static long chunkKey(int x, int z) { return ((long) x << 32) | (z & 0xffffffffL); }
+
+    private void preload(Slot slot, Object token, java.util.Iterator<Long> chunks, Runnable done,
+                         java.util.function.Consumer<String> failed) {
+        if (!slot.busy || slot.buildToken != token) { return; }
+        if (!chunks.hasNext()) { done.run(); return; }
+        long key = chunks.next();
+        int x = (int) (key >> 32), z = (int) key;
+        world.getChunkAtAsync(x, z, true).orTimeout(30, java.util.concurrent.TimeUnit.SECONDS).whenComplete((chunk, error) -> {
+            if (!plugin.isEnabled()) { return; }
+            Bukkit.getScheduler().runTask(plugin, () -> {
+                if (!slot.busy || slot.buildToken != token) { return; }
+                if (error != null) { abortPreparation(slot, token, failed, "区块加载失败：" + error.getMessage()); return; }
+                try {
+                    world.addPluginChunkTicket(x, z, plugin);
+                    slot.preparationChunks.add(key);
+                    preload(slot, token, chunks, done, failed);
+                } catch (RuntimeException e) { abortPreparation(slot, token, failed, e.getMessage()); }
+            });
+        });
+    }
+
+    private void abortPreparation(Slot slot, Object token, java.util.function.Consumer<String> failed, String reason) {
+        if (slot.buildToken != token) { return; }
+        plugin.getLogger().warning("内置副本准备失败：" + reason);
+        release(slot, "§c副本准备失败，本次未扣体力。");
+        failed.accept(reason);
+    }
+
+    private void dropPreparationChunks(Slot slot) {
+        for (long key : slot.preparationChunks) {
+            // 已正式接管的票据不能在这里撤掉（插件票据不是引用计数）。
+            int x = (int) (key >> 32), z = (int) key;
+            if (!slot.ticketed || x < slot.ticketMinChunkX || x > slot.ticketMaxChunkX
+                    || z < slot.ticketMinChunkZ || z > slot.ticketMaxChunkZ) {
+                world.removePluginChunkTicket(x, z, plugin);
+            }
+        }
+        slot.preparationChunks.clear();
     }
 
     /** 清空槽位区域内的方块与实体。 */
@@ -402,13 +575,16 @@ public final class Instances {
     /** 插件卸载 / 关服前把所有槽位的票据撤掉，别把区块钉到下一个生命周期。 */
     public void releaseAllTickets() {
         for (Slot slot : slots.values()) {
+            slot.buildToken = null;
+            if (slot.buildTask != null) { slot.buildTask.cancel(); slot.buildTask = null; }
+            dropPreparationChunks(slot);
             dropChunkTickets(slot);
         }
     }
 
     /** 房间清场：补给箱 + 按钮；首领房则给最终奖励箱和离开用的木门。 */
     public void grantRewards(Slot slot, Dungeon.Room room) {
-        Tier tier = plugin.tier(slot.tier);
+        Tier tier = tierFor(slot);
         if (room.bossRoom) {
             if (room.exitPlate != null) {
                 // 模板副本：通关后出现离开压力板（踩上去就出去）
@@ -524,7 +700,7 @@ public final class Instances {
      * 最后一波清完才算这间完成。
      */
     private void advanceWave(Slot slot, Dungeon.Room room) {
-        if (room.cleared) {
+        if (!slot.busy || slot.failure != null || room.cleared || room.spawning || room.wavePending) {
             return;
         }
         int next = room.waveIndex + 1;
@@ -534,20 +710,21 @@ public final class Instances {
             room.emptySince = System.currentTimeMillis();
             Dungeon dungeon = slot.dungeon;
             announceWave(slot, room, next, true);
-            Bukkit.getScheduler().runTaskLater(plugin, () -> {
-                if (!slot.busy || slot.dungeon != dungeon || room.cleared) {
+            room.waveTask = Bukkit.getScheduler().runTaskLater(plugin, () -> {
+                room.waveTask = null;
+                if (!slot.busy || slot.failure != null || slot.dungeon != dungeon || room.cleared
+                        || !room.wavePending || room.pendingWave != next) {
                     return;   // 槽位已经回收或重开了，别再刷
                 }
-                DungeonBuilder.spawnWave(world, room, next, plugin.tier(slot.tier));
-                announceWave(slot, room, next, false);
-                refreshBar(slot);
+                spawnWave(slot, room, next);
             }, WAVE_DELAY_TICKS);
             return;
         }
         // 最后一波也清完了。1.4.13：首领房必须"确认击杀首领"才算通关 ——
         // 以前是"名单空了就算通关"，而活着的首领只要一时查不到（区块卸载）就会被当成死了，
         // 于是出现"首领还在却已经结算"。
-        if (room.bossRoom && !room.bossKilled && ensureBossAlive(slot, room)) {
+        if (room.bossRoom && !room.bossKilled) {
+            ensureBossAlive(slot, room);
             return;
         }
         completeRoom(slot, room);
@@ -555,7 +732,8 @@ public final class Instances {
 
     /** 这一间真的完成了：发奖励、清场广播，首领房额外弹结算界面。 */
     private void completeRoom(Slot slot, Dungeon.Room room) {
-        if (room.cleared) {
+        if (!slot.busy || slot.failure != null || room.cleared || !room.mobs.isEmpty()
+                || (room.bossRoom && !room.bossKilled)) {
             return;
         }
         room.cleared = true;
@@ -571,32 +749,81 @@ public final class Instances {
      * 首领房保险：没确认击杀首领就不许通关。
      *
      * <p>返回 true = 首领"已经回来了"（把还在的原实体找回名单，或原地补刷一只），房间继续等它被打死；
-     * 返回 false = 补刷次数用尽或压根刷不出来，调用方按通关处理（宁可放行，也别把玩家永久卡在这一间）。
+     * 恢复耗尽会标记系统异常，由管理器退款并回收；绝不调用通关流程。
      */
     private boolean ensureBossAlive(Slot slot, Dungeon.Room room) {
-        if (room.bossId != null) {
-            Entity existing = Bukkit.getEntity(room.bossId);
-            if (existing instanceof LivingEntity living && !living.isDead() && living.isValid()) {
+        if (slot.failure != null) { return true; }
+        try {
+            LivingEntity living = MobSpawner.find(world, room.bossId, room.bossEntity,
+                    room.bossId == null ? room.center : room.lastSeen.get(room.bossId));
+            if (living != null) {
+                room.bossEntity = living;
+                room.bossRecovery.found();
+                room.lastSeen.put(room.bossId, living.getLocation().clone());
                 if (!room.mobs.contains(room.bossId)) {
                     room.mobs.add(room.bossId);
-                    room.lastSeen.put(room.bossId, living.getLocation());
+                    room.entities.put(room.bossId, living);
                     room.missingSeconds.remove(room.bossId);
                     plugin.getLogger().warning("首领房：首领其实还活着（被误剔出名单），已重新纳入追踪");
                 }
                 return true;
             }
+            Location last = room.bossEntity == null ? room.center : room.bossEntity.getLocation();
+            SpawnRecovery.Decision decision = room.bossRecovery.missing(System.currentTimeMillis(),
+                    MobSpawner.entitiesReady(last));
+            if (decision == SpawnRecovery.Decision.ABORT) {
+                fail(slot, "首领恢复失败，已尝试 " + room.bossRecovery.attempts() + " 次；最后原因："
+                        + (room.lastBossFailure == null ? "实体持续失踪" : room.lastBossFailure.getMessage()), room.lastBossFailure);
+            } else if (decision == SpawnRecovery.Decision.RETRY) {
+                if (room.bossId != null) {
+                    room.mobs.remove(room.bossId);
+                    room.entities.remove(room.bossId);
+                    room.lastSeen.remove(room.bossId);
+                }
+                room.bossRespawns = room.bossRecovery.attempts();
+                try {
+                    DungeonBuilder.spawnBoss(world, room, tierFor(slot));
+                    plugin.getLogger().warning("首领恢复第 " + room.bossRespawns + " 次成功；仍需有效击杀");
+                } catch (RuntimeException e) {
+                    room.lastBossFailure = e;
+                    plugin.getLogger().warning("首领恢复第 " + room.bossRespawns + " 次失败：" + e.getMessage());
+                    FailureDiagnostics.record(plugin, "首领补刷失败 槽位#" + slot.index + " 难度=" + slot.tier,
+                            e.getMessage(), e);
+                }
+            }
+        } catch (RuntimeException e) {
+            fail(slot, "加载首领实体失败：" + e.getMessage());
         }
-        Tier tier = plugin.tier(slot.tier);
-        if (room.center == null || tier == null || room.bossRespawns >= MAX_BOSS_RESPAWNS) {
-            plugin.getLogger().warning("首领房：首领找不回、也补刷不了（已补 " + room.bossRespawns
-                    + " 次），这一间按通关处理");
-            return false;
-        }
-        room.bossRespawns++;
-        DungeonBuilder.spawnBoss(world, room, tier);
-        plugin.getLogger().warning("首领房：首领不见了，已在房间中央补刷第 " + room.bossRespawns + " 只");
-        refreshBar(slot);
         return true;
+    }
+
+    private void spawnWave(Slot slot, Dungeon.Room room, int wave) {
+        if (!slot.busy || slot.failure != null) { return; }
+        try {
+            DungeonBuilder.spawnWave(world, room, wave, tierFor(slot));
+            if (room.lastBossFailure != null) {
+                plugin.getLogger().warning("首领首次生成失败，进入恢复等待：" + room.lastBossFailure.getMessage());
+                FailureDiagnostics.record(plugin, "首领首次生成失败 槽位#" + slot.index + " 难度=" + slot.tier
+                        + " 房间=" + room.displayIndex + " 波=" + (wave + 1), room.lastBossFailure.getMessage(), room.lastBossFailure);
+            }
+            announceWave(slot, room, wave, false);
+            refreshBar(slot);
+        } catch (RuntimeException e) {
+            fail(slot, "第 " + room.displayIndex + " 间生成失败：" + e.getMessage(), e);
+        }
+    }
+
+    private void fail(Slot slot, String reason) {
+        fail(slot, reason, null);
+    }
+
+    private void fail(Slot slot, String reason, Throwable cause) {
+        if (slot.failure == null) {
+            slot.failure = reason;
+            plugin.getLogger().severe("副本槽位 " + slot.index + " 异常终止：" + reason);
+            FailureDiagnostics.record(plugin, "内置副本终止 槽位#" + slot.index + " 难度=" + slot.tier
+                    + " 世界=" + (world == null ? "未创建" : world.getName()), reason, cause);
+        }
     }
 
     /** 波次提示：3 秒预告 / 新一波登场（标题 + 音效）。 */
@@ -629,7 +856,7 @@ public final class Instances {
             String rank = rank(slot, elapsed, deaths);
             player.sendMessage("§5[副本]§r §a通关！用时 §f" + formatDuration(elapsed)
                     + "§a，击杀 §f" + slot.kills + "§a，评级 §e" + rank + "§a。");
-            Tier tier = plugin.tier(slot.tier);
+            Tier tier = tierFor(slot);
             if (tier != null && tier.moneyReward() > 0) {
                 boolean paid = Bukkit.dispatchCommand(Bukkit.getConsoleSender(),
                         "eco give " + player.getName() + " " + tier.moneyReward());
@@ -664,7 +891,7 @@ public final class Instances {
     }
 
     private Inventory summaryInventory(Slot slot, Player player, long elapsed, int deaths, String rank) {
-        Tier tier = plugin.tier(slot.tier);
+        Tier tier = tierFor(slot);
         int limit = Math.max(1, slot.limitMinutes);
         SummaryHolder holder = new SummaryHolder();
         Inventory inventory = Bukkit.createInventory(holder, 27, "§5副本结算 · 评级 " + rank);
@@ -750,6 +977,8 @@ public final class Instances {
         return false;
     }
 
+    private Tier tierFor(Slot slot) { return slot.settings != null ? slot.settings : plugin.tier(slot.tier); }
+
     // ---------------------------------------------------------------- 老模板路线（已删除）
     //
     // 1.5.0 起自建副本走的是"复制整个世界"（见 DungeonRun / InstanceWorlds），老的那条
@@ -761,60 +990,30 @@ public final class Instances {
     //   D5    enforceGates 会把管理员标定的固定坐标上的按钮/压力板每秒抠掉
     // 骨架类 Template / TemplateEditor 暂时留着：M5 做入口建筑要抽里面的结构读写（Paper Structure API）。
 
-    /**
-     * 兜底：怪物没留下死亡事件就消失了（被别的插件清掉、掉出世界等），
-     * 把名单里已经不存在的实体剔掉；整间都空了就按清场处理，
-     * 免得血条永远挂着"剩余 N 只"。
-     *
-     * <p><b>1.4.13 的两处加固</b>（这两条正是"活着的首领被判成已通关"的根源）：
-     * <ol>
-     *   <li>判断"查不到"时看的是**这只怪自己最后出现的位置**所在区块加载了没有，
-     *       不再只看房间中心 —— 怪跑远了、房间中心还加载着，以前就会被误判成"已消失"；</li>
-     *   <li>要连续 {@value #MISSING_SECONDS_BEFORE_DROP} 秒都查不到才剔除（以前是一秒一次直接删），
-     *       瞬时抖动不会再把活怪误杀；剔除时打日志，含坐标，方便事后追溯。</li>
-     * </ol>
-     */
+    /** 坐标的可读写法（日志用）。 */
+    private static String xyz(Location location) {
+        if (location == null) {
+            return "未知";
+        }
+        return location.getBlockX() + "," + location.getBlockY() + "," + location.getBlockZ();
+    }
+
     private void pruneVanishedMobs(Slot slot) {
         if (slot.dungeon == null) {
             return;
         }
+        int budget = MobRecovery.MAX_ATTEMPTS_PER_TICK;
         for (Dungeon.Room room : slot.dungeon.rooms) {
             if (room.cleared || room.mobs.isEmpty()) {
                 continue;
             }
-            boolean changed = false;
-            for (Iterator<UUID> it = room.mobs.iterator(); it.hasNext(); ) {
-                UUID uuid = it.next();
-                Entity entity = Bukkit.getEntity(uuid);
-                if (entity != null && !entity.isDead() && entity.isValid()) {
-                    // 还活着：刷新"最后已知位置"，并把失踪计数清零
-                    room.lastSeen.put(uuid, entity.getLocation());
-                    room.missingSeconds.remove(uuid);
-                    continue;
-                }
-                Location seen = room.lastSeen.get(uuid);
-                if (seen != null && seen.getWorld() != null
-                        && !seen.getWorld().isChunkLoaded(seen.getBlockX() >> 4, seen.getBlockZ() >> 4)) {
-                    // 它最后一次出现的地方区块没加载 —— 查不到很正常，别动名单
-                    room.missingSeconds.remove(uuid);
-                    continue;
-                }
-                int missing = room.missingSeconds.merge(uuid, 1, Integer::sum);
-                if (missing < MISSING_SECONDS_BEFORE_DROP) {
-                    continue;   // 再给它几秒：可能只是瞬时查不到
-                }
-                plugin.getLogger().warning("第 " + room.displayIndex + " 间有怪连续 "
-                        + missing + " 秒查不到且区块是加载的，按已消失处理（最后位置 "
-                        + (seen == null ? "未知"
-                                : (seen.getBlockX() + "," + seen.getBlockY() + "," + seen.getBlockZ()))
-                        + "）");
-                it.remove();
-                room.missingSeconds.remove(uuid);
-                room.lastSeen.remove(uuid);
-                changed = true;
-            }
-            if (changed && room.mobs.isEmpty() && !room.wavePending && !room.cleared) {
-                advanceWave(slot, room);
+            try {
+                budget = MobRecovery.tick(plugin, world, "副本槽位 " + slot.index + " 第 " + room.displayIndex
+                                + " 间 第 " + (room.waveIndex + 1) + " 波", room.mobs, room.bossId,
+                        room.entities, room.lastSeen, room.mobRecovery, budget);
+            } catch (RuntimeException e) {
+                fail(slot, "第 " + room.displayIndex + " 间的战斗怪物无法恢复：" + e.getMessage(), e);
+                return;
             }
         }
     }
@@ -824,6 +1023,60 @@ public final class Instances {
      * 说明推进链路某一环断了（刷怪任务异常、提前 return 等）。超时后强制推进，
      * 避免整间永远清不掉、玩家再也拿不到结算。
      */
+    /**
+     * "走进房间才开始刷怪"（1.5.0-M7）。
+     *
+     * <p>为什么改：以前建房时就把每一间房的第一波全刷出来，最远的房间离玩家几百格。
+     * 那些怪既不在模拟距离内（**不 tick**，看起来站着不动），区块一卸载又会从内存里消失
+     * （{@code getEntity} 返回 null）→ 插件看成"怪不见了"，首领那条路甚至直接结算。
+     * 玩家报的"高难度副本、打得越慢 boss 越容易自己消失"就是这么来的。
+     *
+     * <p>现在只有玩家**真的走进那一间**（含 {@value #ROOM_START_MARGIN} 格边距）才刷这一间的怪。
+     * 顺带的好处：一局里同时活着的怪少了一大截（10 间房的副本以前是把 10 间全挂着的）。
+     */
+    private void startRoomsNearPlayers(Slot slot) {
+        if (slot.dungeon == null || slot.failure != null) {
+            return;
+        }
+        for (Dungeon.Room room : slot.dungeon.rooms) {
+            if (room.index == 0 || room.cleared) {
+                continue;
+            }
+            // 只允许首个未完成房间启动，不能隔着门提前唤醒后面的房间。
+            if (room.started || room.waves.isEmpty()) { return; }
+            if (firstPlayerInside(slot, room) == null) {
+                return;
+            }
+            room.started = true;
+            spawnWave(slot, room, 0);
+            return;
+        }
+    }
+
+    /** 这一间房（含 margin 格边距）里的第一个玩家；没人返回 null。 */
+    private Player firstPlayerInside(Slot slot, Dungeon.Room room) {
+        if (room.origin == null) {
+            return null;
+        }
+        for (UUID uuid : slot.entranceOf.keySet()) {
+            Player player = Bukkit.getPlayer(uuid);
+            if (player == null || !player.isOnline()
+                    || player.isDead() || player.getGameMode() == GameMode.SPECTATOR
+                    || !player.getWorld().equals(room.origin.getWorld())) {
+                continue;
+            }
+            Location at = player.getLocation();
+            if (at.getBlockX() >= room.origin.getBlockX() - ROOM_START_MARGIN
+                    && at.getBlockX() <= room.origin.getBlockX() + DungeonBuilder.ROOM + ROOM_START_MARGIN
+                    && at.getBlockZ() >= room.origin.getBlockZ() - ROOM_START_MARGIN
+                    && at.getBlockZ() <= room.origin.getBlockZ() + DungeonBuilder.ROOM + ROOM_START_MARGIN
+                    && Math.abs(at.getY() - room.origin.getY() - 1) <= DungeonBuilder.HEIGHT) {
+                return player;
+            }
+        }
+        return null;
+    }
+
     private void guardStuckRooms(Slot slot) {
         if (slot.dungeon == null) {
             return;
@@ -831,6 +1084,11 @@ public final class Instances {
         long now = System.currentTimeMillis();
         for (Dungeon.Room room : slot.dungeon.rooms) {
             if (room.index == 0 || room.cleared) {
+                continue;
+            }
+            // 还没开始的房间（玩家没走进去、怪还没刷）不参与"卡住强制推进"，
+            // 否则空名单 10 秒就会被当成"卡住"推过去，等于跳过这一间。
+            if (!room.started) {
                 continue;
             }
             if (room.wavePending) {
@@ -845,11 +1103,19 @@ public final class Instances {
                     room.wavePending = false;
                     room.pendingWave = -1;
                     room.emptySince = now;
-                    DungeonBuilder.spawnWave(world, room, pending, plugin.tier(slot.tier));
+                    if (room.waveTask != null) { room.waveTask.cancel(); room.waveTask = null; }
+                    spawnWave(slot, room, pending);
                 }
                 continue;
             }
-            if (!room.mobs.isEmpty()) {
+            if (hasNonBossMob(room)) {
+                room.emptySince = 0;
+                continue;
+            }
+            // 只剩首领、而它还没被"确认击杀"：**绝不在这里强制推进**。
+            // 它的死活交给 checkBossRooms（找回 / 补刷 / 补刷用尽才放行）。
+            // 以前这里会把"名单里只剩首领"当成"房间没人了"，10 秒后强制推进 → 直接结算。
+            if (room.bossRoom && !room.bossKilled) {
                 room.emptySince = 0;
                 continue;
             }
@@ -864,26 +1130,73 @@ public final class Instances {
         }
     }
 
+    /** 这一间还有没有"非首领"的怪要打（首领单独处理，不算在这里）。 */
+    private static boolean hasNonBossMob(Dungeon.Room room) {
+        for (UUID id : room.mobs) {
+            if (room.bossId == null || !room.bossId.equals(id)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 首领房的独立巡检（每秒一次）。
+     *
+     * <p>为什么必须单独有这一趟：首领一旦被别的插件清掉、或跟着区块卸载后没回来，
+     * 它既不会触发死亡事件，房间也不会被 {@link #guardStuckRooms} 推进
+     * （那一间被我们特意排除了）—— 没有这一趟，玩家就会被永久卡在首领房。
+     *
+     * <p>处置顺序：加载实际区块并找回 → 等待 5 秒 → 有间隔地补刷最多 3 次 → 异常结束并退款。
+     */
+    private void checkBossRooms(Slot slot) {
+        if (slot.dungeon == null || slot.failure != null) {
+            return;
+        }
+        for (Dungeon.Room room : slot.dungeon.rooms) {
+            if (!room.bossRoom || room.cleared || !room.started || room.bossKilled || room.wavePending
+                    || room.waveIndex != room.waves.size() - 1) {
+                continue;
+            }
+            ensureBossAlive(slot, room);
+        }
+    }
+
     /** 怪物死亡后调用：推进房间进度。 */
-    public boolean onMobDeath(Entity entity) {
+    public boolean onMobDeath(LivingEntity entity) {
         if (!ready() || !isInstanceWorld(entity.getWorld())) {
             return false;
         }
         for (Slot slot : slots.values()) {
-            if (!slot.busy || slot.dungeon == null) {
+            if (!slot.busy || slot.failure != null || slot.dungeon == null) {
                 continue;
             }
             for (Dungeon.Room room : slot.dungeon.rooms) {
                 if (room.mobs.remove(entity.getUniqueId())) {
+                    room.entities.remove(entity.getUniqueId());
+                    room.mobRecovery.remove(entity.getUniqueId());
                     room.kills++;
                     slot.kills++;
                     room.missingSeconds.remove(entity.getUniqueId());
                     room.lastSeen.remove(entity.getUniqueId());
-                    // 首领"确认击杀"（收到死亡事件）才允许通关 —— 1.4.13
+                    // 首领"确认击杀"：1.4.13 要求必须有死亡事件；1.5.0 再进一步**判定死因归属** ——
+                    // 被玩家打死的、包括被打进岩浆/打落虚空的，都算玩家赢（见 PlayerHits）；
+                    // 从头到尾没人碰过它、自己消失的，不算通关，走补刷。
                     if (room.bossId != null && room.bossId.equals(entity.getUniqueId())) {
-                        room.bossKilled = true;
+                        boolean byPlayer = PlayerHits.countsAsPlayerKill(entity, slot.entranceOf::containsKey);
+                        if (byPlayer) {
+                            room.bossKilled = true;
+                            plugin.getLogger().info("首领确认击杀（第 " + room.displayIndex + " 间）："
+                                    + PlayerHits.describe(entity) + "，位置 " + xyz(entity.getLocation()));
+                        } else {
+                            room.bossKilled = false;
+                            plugin.getLogger().warning("首领**不算被玩家打死**（第 " + room.displayIndex + " 间）："
+                                    + PlayerHits.describe(entity) + "，位置 " + xyz(entity.getLocation())
+                                    + " → 这一间不放行，交给补刷；反复出现请检查首领房落脚点");
+                        }
+                        PlayerHits.forget(entity);
                     }
-                    if (room.mobs.isEmpty() && !room.wavePending && !room.cleared) {
+                    if (room.mobs.isEmpty() && !room.wavePending && !room.cleared && !room.spawning) {
                         advanceWave(slot, room);
                     }
                     refreshBar(slot);
@@ -914,18 +1227,9 @@ public final class Instances {
             return;
         }
         if (target.bossRoom && target.bossId != null) {
-            Entity entity = Bukkit.getEntity(target.bossId);
-            double max = target.initialBossHealth;
-            double health = entity instanceof LivingEntity living ? living.getHealth() : 0;
-            if (entity instanceof LivingEntity living) {
-                var attribute = living.getAttribute(Attribute.GENERIC_MAX_HEALTH);
-                if (attribute != null) {
-                    max = attribute.getValue();
-                }
-            }
-            slot.bar.setColor(BarColor.RED);
-            slot.bar.setTitle("§c首领 §f" + (int) Math.max(0, health) + " / " + (int) max);
-            slot.bar.setProgress(max <= 0 ? 0 : Math.max(0, Math.min(1, health / max)));
+            double configured = slot.settings != null ? slot.settings.bossHealth() : target.initialBossHealth;
+            try { MobHealth.updateBar(slot.bar, "首领", MobHealth.forBar(target.bossId, target.bossEntity), configured); }
+            catch (MobSpawner.Failure e) { fail(slot, e.getMessage(), e); }
             return;
         }
         String wave = target.waves.size() > 1
@@ -946,8 +1250,36 @@ public final class Instances {
         if (!slot.busy) {
             return;
         }
+        boolean wasPreparing = slot.preparing;
+        slot.buildToken = null;
+        if (slot.buildTask != null) { slot.buildTask.cancel(); slot.buildTask = null; }
+        dropPreparationChunks(slot);
+        slot.preparing = false;
+        slot.preparationPhase = "";
+        if (slot.dungeon != null) {
+            for (Dungeon.Room room : slot.dungeon.rooms) {
+                if (room.waveTask != null) { room.waveTask.cancel(); room.waveTask = null; }
+                room.wavePending = false;
+                for (LivingEntity entity : room.entities.values()) {
+                    PlayerHits.forget(entity);
+                    if (!entity.isDead()) { entity.remove(); }
+                }
+                room.entities.clear();
+                room.mobRecovery.clear();
+                room.mobs.clear();
+            }
+        }
+        if (slot.failure != null) {
+            slot.staminaPaid.forEach((uuid, amount) -> plugin.stamina().refund(uuid, amount));
+        }
+        slot.staminaPaid.clear();
+        if (slot.failure != null) { reason += " §7原因：" + failureText(slot.failure); }
         for (UUID uuid : new ArrayList<>(slot.entranceOf.keySet())) {
             Player player = Bukkit.getPlayer(uuid);
+            if (wasPreparing) {
+                if (player != null && player.isOnline()) { player.sendMessage("§5[副本]§r " + reason); }
+                continue;
+            }
             if (player != null && player.isOnline()) {
                 if (slot.bar != null) {
                     slot.bar.removePlayer(player);
@@ -991,6 +1323,7 @@ public final class Instances {
         }
         Slot slot = byPlayer(player.getUniqueId());
         if (slot != null) {
+            if (slot.preparing) { player.sendMessage("§5[副本]§r §7副本仍在准备，请等待完成。"); return; }
             slot.offlineSince.remove(player.getUniqueId());
             if (slot.bar != null) {
                 slot.bar.addPlayer(player);
@@ -1033,6 +1366,11 @@ public final class Instances {
         }
     }
 
+    static String failureText(String reason) {
+        String clean = reason == null ? "未知错误" : reason.replaceAll("§.", "").replaceAll("[\\r\\n\\t]+", " ");
+        return clean.length() > 240 ? clean.substring(0, 240) + "…" : clean;
+    }
+
     public void leave(Player player, String reason) {
         Slot slot = byPlayer(player.getUniqueId());
         if (slot == null) {
@@ -1064,7 +1402,11 @@ public final class Instances {
         }
         long now = System.currentTimeMillis();
         for (Slot slot : slots.values()) {
-            if (!slot.busy) {
+            if (!slot.busy || slot.preparing) {
+                continue;
+            }
+            if (slot.failure != null) {
+                release(slot, "§c副本生成异常，本局结束，已扣体力已退还；本局未通关。");
                 continue;
             }
             if (now > slot.deadline) {
@@ -1108,8 +1450,18 @@ public final class Instances {
                     }
                 }
             }
-            pruneVanishedMobs(slot);
-            guardStuckRooms(slot);
+            try {
+                startRoomsNearPlayers(slot);
+                if (slot.failure == null) { pruneVanishedMobs(slot); }
+                if (slot.failure == null) { checkBossRooms(slot); }
+                if (slot.failure == null) { guardStuckRooms(slot); }
+            } catch (RuntimeException e) {
+                fail(slot, "战斗更新失败：" + e.getMessage());
+            }
+            if (slot.failure != null) {
+                release(slot, "§c副本生成异常，本局结束，已扣体力已退还；本局未通关。");
+                continue;
+            }
             enforceGates(slot);
             refreshBar(slot);
             if (slot.entranceOf.isEmpty()) {

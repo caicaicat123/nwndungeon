@@ -22,7 +22,7 @@ import java.util.Map;
  * 首领房的 {@code boss.waves} 是"前面的小怪波"，最后一波 = {@code boss.guards} + 首领本人。
  */
 public record Tier(String id, String display, Material floorBlock, int timeLimitMinutes,
-                   List<List<String>> rooms, String bossType, String bossName, int bossHealth,
+                   List<List<String>> rooms, String bossType, String bossName, double bossHealth,
                    List<String> bossWaves, String bossGuards,
                    List<LootEntry> supplyItems, List<LootEntry> rewardItems,
                    int moneyReward, int staminaCost) {
@@ -36,7 +36,7 @@ public record Tier(String id, String display, Material floorBlock, int timeLimit
                 readRooms(section.getList("rooms")),
                 section.getString("boss.type", "ZOMBIE").toUpperCase(Locale.ROOT),
                 section.getString("boss.name", "§c首领"),
-                Math.max(20, section.getInt("boss.health", 60)),
+                MobHealth.read(section, "boss.health", 60),
                 toStrings(section.getList("boss.waves")),
                 section.getString("boss.guards", ""),
                 loot != null && loot.has(id) ? loot.supply(id) : LootTables.parse(section.getList("supply-chest")),

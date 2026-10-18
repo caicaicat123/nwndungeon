@@ -1,9 +1,14 @@
 package nwndungeon;
 
 import org.bukkit.NamespacedKey;
+import org.bukkit.Bukkit;
 import org.bukkit.configuration.file.FileConfiguration;
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.persistence.PersistentDataType;
+
+import java.io.File;
+import java.util.UUID;
 
 /**
  * 副本体力（每日次数）。
@@ -19,11 +24,15 @@ public final class Stamina {
     private boolean enabled;
     private int max;
     private long regenTicks;
+    private final File refundFile;
+    private final YamlConfiguration refunds;
 
     public Stamina(NWNDungeon plugin) {
         this.plugin = plugin;
         this.poolKey = new NamespacedKey(plugin, "stamina");
         this.timeKey = new NamespacedKey(plugin, "stamina_time");
+        refundFile = new File(plugin.getDataFolder(), "stamina-refunds.yml");
+        refunds = YamlConfiguration.loadConfiguration(refundFile);
         reload();
     }
 
@@ -64,6 +73,21 @@ public final class Stamina {
         return true;
     }
 
+    /** 系统异常退还本局实际扣除的体力；离线退款落盘，登录后或下次查体力时领取。 */
+    public void refund(UUID uuid, int amount) {
+        if (amount <= 0) { return; }
+        String key = uuid.toString();
+        refunds.set(key, refunds.getInt(key, 0) + amount);
+        saveRefunds();
+        Player player = Bukkit.getPlayer(uuid);
+        if (player != null && player.isOnline()) { state(player); }
+    }
+
+    private void saveRefunds() {
+        try { refunds.save(refundFile); }
+        catch (java.io.IOException e) { plugin.getLogger().severe("体力退款记录保存失败：" + e.getMessage()); }
+    }
+
     /** 距离回下一点还有多少秒（已满返回 0）。 */
     public long secondsToNextPoint(Player player) {
         long[] state = state(player);
@@ -100,6 +124,15 @@ public final class Stamina {
             write(player, value, since);
         } else if (stored == null || last == null) {
             write(player, value, since);
+        }
+        String refundKey = player.getUniqueId().toString();
+        int pending = refunds.getInt(refundKey, 0);
+        if (pending > 0) {
+            value = Math.min(max, value + pending);
+            write(player, value, since);
+            refunds.set(refundKey, null);
+            saveRefunds();
+            player.sendMessage("§5[副本]§r §a系统异常退还体力 " + pending + " 点（最多恢复至体力上限）。");
         }
         return new long[]{value, since};
     }

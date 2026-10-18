@@ -45,10 +45,10 @@ public record MobTemplate(String id, EntityType type, String name, double health
         if (!file.exists()) {
             return out;
         }
-        YamlConfiguration yaml = YamlConfiguration.loadConfiguration(file);
+        YamlConfiguration yaml = SafeYaml.read(file);
         ConfigurationSection root = yaml.getConfigurationSection("mobs");
         if (root == null) {
-            return out;
+            throw new SafeYaml.Problem("mobs.yml 必须包含 mobs: 配置段；空表请写 mobs: {}");
         }
         for (String id : root.getKeys(false)) {
             ConfigurationSection section = root.getConfigurationSection(id);
@@ -58,7 +58,7 @@ public record MobTemplate(String id, EntityType type, String name, double health
             try {
                 out.put(id.toLowerCase(Locale.ROOT), from(id.toLowerCase(Locale.ROOT), section));
             } catch (Exception e) {
-                plugin.getLogger().warning("怪物模板 " + id + " 读取失败：" + e.getMessage());
+                throw new SafeYaml.Problem("怪物模板 " + id + " 读取失败：" + e.getMessage(), e);
             }
         }
         return out;
@@ -69,8 +69,9 @@ public record MobTemplate(String id, EntityType type, String name, double health
         try {
             type = EntityType.valueOf(section.getString("type", "ZOMBIE").toUpperCase(Locale.ROOT));
         } catch (Exception e) {
-            type = EntityType.ZOMBIE;
+            throw new SafeYaml.Problem("未知的怪物类型：" + section.getString("type"), e);
         }
+        if (!MobSpawner.supported(type)) { throw new SafeYaml.Problem("不能用于战斗的怪物类型：" + type); }
         EnumMap<EquipmentSlot, ItemStack> equipment = new EnumMap<>(EquipmentSlot.class);
         ConfigurationSection eq = section.getConfigurationSection("equipment");
         if (eq != null) {
@@ -82,7 +83,7 @@ public record MobTemplate(String id, EntityType type, String name, double health
                 }
                 Material material = Material.matchMaterial(String.valueOf(itemSection.getString("item", "")));
                 if (material == null || material.isAir()) {
-                    continue;
+                    throw new SafeYaml.Problem("未知的装备物品：" + itemSection.getString("item"));
                 }
                 ItemStack stack = new ItemStack(material);
                 ConfigurationSection enchants = itemSection.getConfigurationSection("enchants");
@@ -117,7 +118,7 @@ public record MobTemplate(String id, EntityType type, String name, double health
         return new MobTemplate(id,
                 type,
                 section.getString("name", id),
-                Math.max(1, section.getDouble("health", 20)),
+                MobHealth.read(section, "health", 20),
                 Math.max(0, section.getDouble("damage", 2)),
                 Math.max(0.01, section.getDouble("speed", 0.23)),
                 Math.max(0, Math.min(1, dropChance)),
@@ -143,11 +144,7 @@ public record MobTemplate(String id, EntityType type, String name, double health
             entity.setCustomName(name);
             entity.setCustomNameVisible(true);
         }
-        AttributeInstance maxHealth = entity.getAttribute(Attribute.GENERIC_MAX_HEALTH);
-        if (maxHealth != null) {
-            maxHealth.setBaseValue(health);
-            entity.setHealth(Math.min(health, maxHealth.getValue()));
-        }
+        MobHealth.apply(entity, health);
         AttributeInstance attack = entity.getAttribute(Attribute.GENERIC_ATTACK_DAMAGE);
         if (attack != null) {
             attack.setBaseValue(damage);

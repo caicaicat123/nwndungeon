@@ -95,7 +95,7 @@ public final class DungeonDef {
     public static final class BossSpec {
         public String type = "ZOMBIE";
         public String name = "§c首领";
-        public int health = 60;
+        public double health = 60;
         /** 首领登场前的小怪波。 */
         public final List<String> waves = new ArrayList<>();
         /** 随首领一起登场的护卫（{@code "ZOMBIE:3"}）。 */
@@ -108,7 +108,7 @@ public final class DungeonDef {
             }
             spec.type = section.getString("type", "ZOMBIE");
             spec.name = section.getString("name", "§c首领");
-            spec.health = Math.max(20, section.getInt("health", 60));
+            spec.health = MobHealth.read(section, "health", 60);
             spec.waves.addAll(Stage.clean(section.getList("waves")));
             spec.guards = section.getString("guards", "");
             return spec;

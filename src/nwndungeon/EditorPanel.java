@@ -636,6 +636,15 @@ public final class EditorPanel {
 
     /** 奖励箱界面关掉 = 把里面的东西写进 loot.yml。 */
     public boolean handleClose(InventoryCloseEvent event) {
+        try { return handleCloseChecked(event); }
+        catch (SafeYaml.Problem failure) {
+            event.getPlayer().sendMessage("§c奖励配置未保存：" + failure.getMessage());
+            plugin.getLogger().warning(failure.getMessage());
+            return true;
+        }
+    }
+
+    private boolean handleCloseChecked(InventoryCloseEvent event) {
         if (!(event.getInventory().getHolder() instanceof Holder holder)) {
             return false;
         }
@@ -662,7 +671,13 @@ public final class EditorPanel {
 
     private void later(Player player, Runnable action) {
         // 在 InventoryClickEvent 里换界面要等下一 tick，不然客户端会闪一下甚至不显示
-        Bukkit.getScheduler().runTask(plugin, action);
+        Bukkit.getScheduler().runTask(plugin, () -> {
+            try { action.run(); }
+            catch (SafeYaml.Problem failure) {
+                player.sendMessage("§c操作未保存：" + failure.getMessage());
+                plugin.getLogger().warning(failure.getMessage());
+            }
+        });
     }
 
     private void handleList(Player player, int slot, boolean rightClick) {

@@ -25,8 +25,23 @@ public final class Dungeon {
         public int waveIndex;             // 当前第几波（0 基）
         public boolean wavePending;       // 正在等下一波刷新（3 秒）
         public UUID bossId;
+        public org.bukkit.entity.LivingEntity bossEntity;
+        public RuntimeException lastBossFailure;
+        public final SpawnRecovery bossRecovery = new SpawnRecovery();
+        public final Map<UUID, org.bukkit.entity.LivingEntity> entities = new HashMap<>();
+        public final Map<UUID, MobRecovery> mobRecovery = new HashMap<>();
+        public org.bukkit.scheduler.BukkitTask waveTask;
+        public boolean spawning;
         public boolean bossRoom;
         public boolean cleared;           // 所有波都清完了
+        /**
+         * 这一间是否已经"开始"（怪已经刷出来了）。
+         *
+         * <p>1.5.0-M7：以前建房时就把**每一间房**的第一波全刷出来，最远那间离玩家几百格 ——
+         * 不在模拟距离内（不 tick），区块一卸载就"消失"，于是出现
+         * "高难度副本里首领自己消失然后直接结算"。现在改成**玩家走进房间才开始刷**。
+         */
+        public boolean started;
         public Location origin;           // 房间原点（rx, oy, oz）：运行时补刷波次用
         public Location doorLower;        // 通往下一间的铁门（最后一间为 null）
         public Location plateSpot;        // 清场后压力板出现的位置（门前地板上）

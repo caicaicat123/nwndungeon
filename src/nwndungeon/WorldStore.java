@@ -321,8 +321,9 @@ public final class WorldStore {
                 continue;
             }
             World loaded = Bukkit.getWorld(name);
-            if (loaded != null) {
-                unload(loaded, false);
+            if (loaded != null && !unload(loaded, false)) {
+                plugin.getLogger().severe("临时世界卸载失败，保留目录，不执行移动或删除：" + name);
+                continue;
             }
             if (name.startsWith(Names.TEMPLATE_PREFIX) || name.startsWith(Names.ENTRANCE_PREFIX)) {
                 if (!recovered.isDirectory()) {
@@ -335,7 +336,7 @@ public final class WorldStore {
                             + target.getName());
                     cleaned.add(name);
                 } else {
-                    plugin.addPendingDelete(child);
+                    plugin.getLogger().severe("编辑世界恢复归档失败，原目录已保留，请手动备份：" + child);
                 }
                 continue;
             }

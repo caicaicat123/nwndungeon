@@ -31,37 +31,80 @@ public final class DungeonRegistry {
     private YamlConfiguration registry = new YamlConfiguration();
     /** 名字 → 定义（保持文件里的顺序）。 */
     private final Map<String, DungeonDef> dungeons = new LinkedHashMap<>();
+    private String fileRevision = SafeYaml.MISSING;
+    private String registryRevision = SafeYaml.MISSING;
+
+    public record Pending(YamlConfiguration yaml, YamlConfiguration registry,
+                          Map<String, DungeonDef> definitions, String fileRevision, String registryRevision) { }
 
     public DungeonRegistry(NWNDungeon plugin) {
+        this(plugin, plugin.getDataFolder());
+    }
+
+    DungeonRegistry(NWNDungeon plugin, File folder) {
         this.plugin = plugin;
-        this.file = new File(plugin.getDataFolder(), "dungeons.yml");
-        this.registryFile = new File(plugin.getDataFolder(), "registry.yml");
+        this.file = new File(folder, "dungeons.yml");
+        this.registryFile = new File(folder, "registry.yml");
+    }
+
+    private java.util.logging.Logger log() {
+        return plugin == null ? java.util.logging.Logger.getLogger("NWNDungeon.Config") : plugin.getLogger();
     }
 
     // ---------------------------------------------------------------- 读
 
     public void load() {
-        dungeons.clear();
+        install(prepareLoad());
+    }
+
+    public Pending prepareLoad() {
         if (!file.exists()) {
             writeDefaultFile();
         }
-        yaml = YamlConfiguration.loadConfiguration(file);
-        registry = registryFile.exists() ? YamlConfiguration.loadConfiguration(registryFile)
-                : new YamlConfiguration();
-        ConfigurationSection root = yaml.getConfigurationSection("dungeons");
+        String revisionBefore = SafeYaml.revision(file);
+        String registryBefore = SafeYaml.revision(registryFile);
+        YamlConfiguration nextYaml = SafeYaml.read(file);
+        YamlConfiguration nextRegistry = SafeYaml.read(registryFile);
+        Map<String, DungeonDef> next = new LinkedHashMap<>();
+        ConfigurationSection root = nextYaml.getConfigurationSection("dungeons");
         if (root == null) {
-            return;
+            throw new SafeYaml.Problem("dungeons.yml 必须包含 dungeons: 配置段；空列表请写 dungeons: {}");
         }
+        Set<String> used = new LinkedHashSet<>();
         for (String name : root.getKeys(false)) {
             ConfigurationSection section = root.getConfigurationSection(name);
             if (section == null) {
-                continue;
+                throw new SafeYaml.Problem("副本定义不是键值表：" + name);
             }
             DungeonDef def = DungeonDef.from(name, section);
-            def.slug = readSlug(name);
-            dungeons.put(name, def);
+            String slug = nextRegistry.getString("dungeons." + name + ".slug");
+            if (slug == null || !Names.isValidWorldName(slug)) {
+                String base = Names.slugOf(name);
+                slug = base;
+                int suffix = 2;
+                while (used.contains(slug)) { slug = base + "_" + suffix++; }
+                nextRegistry.set("dungeons." + name + ".slug", slug);
+            }
+            if (!used.add(slug.toLowerCase(Locale.ROOT))) {
+                throw new SafeYaml.Problem("两个副本使用了相同的世界名：" + slug);
+            }
+            def.slug = slug;
+            next.put(name, def);
         }
-        plugin.getLogger().info("自建副本 " + dungeons.size() + " 个："
+        if (!revisionBefore.equals(SafeYaml.revision(file)) || !registryBefore.equals(SafeYaml.revision(registryFile))) {
+            throw new SafeYaml.Problem("读取过程中配置发生变化，请重新重载");
+        }
+        return new Pending(nextYaml, nextRegistry, next, revisionBefore, registryBefore);
+    }
+
+    public void install(Pending pending) {
+        yaml = pending.yaml();
+        registry = pending.registry();
+        dungeons.clear();
+        dungeons.putAll(pending.definitions());
+        fileRevision = pending.fileRevision();
+        registryRevision = pending.registryRevision();
+        log().info("自建副本 " + dungeons.size() + " 个："
                 + (dungeons.isEmpty() ? "（无）" : String.join("、", dungeons.keySet())));
     }
 
@@ -120,33 +163,36 @@ public final class DungeonRegistry {
                     "#       guards: 'CREEPER:3'                          # 随首领一起登场的护卫",
                     "#     markers: {}                                    # 这个由面板写",
                     "dungeons: {}");
-            java.nio.file.Files.writeString(file.toPath(), String.join(System.lineSeparator(), lines)
-                    + System.lineSeparator());
+            YamlConfiguration defaults = SafeYaml.parse(String.join(System.lineSeparator(), lines)
+                    + System.lineSeparator(), file.getPath());
+            SafeYaml.save(file, defaults, SafeYaml.MISSING);
         } catch (Exception e) {
-            plugin.getLogger().warning("dungeons.yml 建不出来：" + e.getMessage());
+            throw new SafeYaml.Problem("dungeons.yml 建不出来：" + e.getMessage(), e);
         }
     }
 
     // ---------------------------------------------------------------- 写
 
     public void save() {
-        try {
+            YamlConfiguration next = SafeYaml.parse(yaml.saveToString(), "内存副本定义");
+            YamlConfiguration nextRegistry = SafeYaml.parse(registry.saveToString(), "内存副本登记");
             for (Map.Entry<String, DungeonDef> entry : dungeons.entrySet()) {
-                ConfigurationSection section = yaml.getConfigurationSection("dungeons." + entry.getKey());
+                ConfigurationSection section = next.getConfigurationSection("dungeons." + entry.getKey());
                 if (section == null) {
-                    section = yaml.createSection("dungeons." + entry.getKey());
+                    section = next.createSection("dungeons." + entry.getKey());
                 }
                 entry.getValue().writeTo(section);
-                registry.set("dungeons." + entry.getKey() + ".slug", entry.getValue().slug);
-                if (!registry.isSet("dungeons." + entry.getKey() + ".created")) {
-                    registry.set("dungeons." + entry.getKey() + ".created", System.currentTimeMillis());
+                nextRegistry.set("dungeons." + entry.getKey() + ".slug", entry.getValue().slug);
+                if (!nextRegistry.isSet("dungeons." + entry.getKey() + ".created")) {
+                    nextRegistry.set("dungeons." + entry.getKey() + ".created", System.currentTimeMillis());
                 }
             }
-            yaml.save(file);
-            registry.save(registryFile);
-        } catch (Exception e) {
-            plugin.getLogger().warning("dungeons.yml 保存失败：" + e.getMessage());
-        }
+            SafeYaml.saveAll(List.of(new SafeYaml.Write(file, next, fileRevision),
+                    new SafeYaml.Write(registryFile, nextRegistry, registryRevision)));
+            yaml = next;
+            registry = nextRegistry;
+            fileRevision = SafeYaml.revision(file);
+            registryRevision = SafeYaml.revision(registryFile);
     }
 
     // ---------------------------------------------------------------- 查
@@ -263,8 +309,9 @@ public final class DungeonRegistry {
         DungeonDef def = new DungeonDef(name);
         def.slug = allocateSlug(name);
         dungeons.put(name, def);
-        save();
-        plugin.getLogger().info("新建自建副本「" + name + "」，世界名 " + def.slug);
+        try { save(); }
+        catch (SafeYaml.Problem failure) { dungeons.remove(name); throw failure; }
+        log().info("新建自建副本「" + name + "」，世界名 " + def.slug);
         return def;
     }
 
@@ -301,10 +348,18 @@ public final class DungeonRegistry {
         if (def == null) {
             return false;
         }
+        YamlConfiguration previousYaml = SafeYaml.parse(yaml.saveToString(), "删除前副本定义");
+        YamlConfiguration previousRegistry = SafeYaml.parse(registry.saveToString(), "删除前登记");
         dungeons.remove(def.name);
         yaml.set("dungeons." + def.name, null);
         registry.set("dungeons." + def.name, null);
-        save();
+        try { save(); }
+        catch (SafeYaml.Problem failure) {
+            dungeons.put(def.name, def);
+            yaml = previousYaml;
+            registry = previousRegistry;
+            throw failure;
+        }
         File template = store.templateFolder(def.slug);
         if (template.isDirectory()) {
             File graveyard = new File(store.templatesRoot().getParentFile(), "_deleted");

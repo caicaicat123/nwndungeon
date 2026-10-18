@@ -40,40 +40,39 @@ public final class LootRoller {
     public static Map<Integer, ItemStack> roll(Random random, List<LootEntry> pool, int maxTypes,
                                                boolean rich, String dungeonId, NWNDungeon plugin) {
         Map<Integer, ItemStack> loot = new LinkedHashMap<>();
-        if (pool == null || pool.isEmpty()) {
+        if (pool == null || pool.isEmpty() || maxTypes <= 0) {
             return loot;
         }
-        int types = rich ? maxTypes : 1 + random.nextInt(Math.min(3, Math.max(1, maxTypes)));
-        List<LootEntry> candidates = new ArrayList<>();
-        for (LootEntry entry : pool) {
-            if (entry.chance() >= 1.0 || random.nextDouble() < entry.chance()) {
-                candidates.add(entry);
-            }
-        }
-        if (candidates.isEmpty()) {
-            candidates = pool;
-        }
-        int totalWeight = 0;
-        for (LootEntry entry : candidates) {
-            totalWeight += entry.weight();
-        }
-        while (loot.size() < types && loot.size() < 27) {
+        int types = rich ? Math.min(27, maxTypes) : 1 + random.nextInt(Math.min(3, maxTypes));
+        for (LootSelection.Selected selected : LootSelection.weighted(random, pool, types, rich ? 4 : 2)) {
             int slot = random.nextInt(27);
-            if (loot.containsKey(slot)) {
-                continue;
-            }
-            LootEntry picked = pick(random, candidates, totalWeight);
-            int min = picked.min() > 0 ? picked.min() : 1;
-            int max = picked.max() > 0 ? picked.max() : (rich ? 4 : 2);
-            if (max < min) {
-                max = min;
-            }
-            int amount = min + random.nextInt(max - min + 1);
-            ItemStack stack = new ItemStack(picked.material(), Math.max(1, amount));
-            applyEnchants(random, stack, picked, dungeonId, plugin);
+            while (loot.containsKey(slot)) { slot = (slot + 1) % 27; }
+            ItemStack stack = new ItemStack(selected.entry().material(), selected.amount());
+            applyEnchants(random, stack, selected.entry(), dungeonId, plugin);
             loot.put(slot, stack);
         }
         return loot;
+    }
+
+    /** 新配置的独立概率物品；按原版堆叠上限拆分，供每人奖励或补给箱使用。 */
+    public static List<ItemStack> independent(Random random, List<LootEntry> entries,
+                                               String dungeonId, NWNDungeon plugin) {
+        List<ItemStack> items = new ArrayList<>();
+        for (LootSelection.Selected selected : LootSelection.independent(random, entries)) {
+            int remaining = selected.amount();
+            int stackLimit = selected.entry().material().getMaxStackSize();
+            if (stackLimit <= 0) {
+                throw new SafeYaml.Problem("奖励材质不能创建为背包物品：" + selected.entry().material());
+            }
+            while (remaining > 0) {
+                int amount = Math.min(remaining, stackLimit);
+                ItemStack stack = new ItemStack(selected.entry().material(), amount);
+                applyEnchants(random, stack, selected.entry(), dungeonId, plugin);
+                items.add(stack);
+                remaining -= amount;
+            }
+        }
+        return items;
     }
 
     private static LootEntry pick(Random random, List<LootEntry> candidates, int totalWeight) {

@@ -41,6 +41,15 @@ public final class DevCommands {
     // ---------------------------------------------------------------- 执行
 
     public boolean handle(CommandSender sender, String[] args) {
+        try { return handleChecked(sender, args); }
+        catch (SafeYaml.Problem failure) {
+            sender.sendMessage("§c配置操作失败，已保留原文件：" + failure.getMessage());
+            plugin.getLogger().warning(failure.getMessage());
+            return true;
+        }
+    }
+
+    private boolean handleChecked(CommandSender sender, String[] args) {
         if (args.length == 0) {
             Help.send(sender, "/nwd", Help.GROUP_DEV, args);
             return true;

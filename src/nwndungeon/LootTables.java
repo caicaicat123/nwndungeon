@@ -46,14 +46,14 @@ public final class LootTables {
         if (!file.exists()) {
             return tables;
         }
-        YamlConfiguration yaml = YamlConfiguration.loadConfiguration(file);
+        YamlConfiguration yaml = SafeYaml.read(file);
         // 每段 = 一个副本（现在：iron / gold / diamond；以后：模板名）
         ConfigurationSection dungeons = yaml.getConfigurationSection("dungeons");
         if (dungeons == null) {
             dungeons = yaml.getConfigurationSection("tiers");   // 兼容旧写法
         }
         if (dungeons == null) {
-            return tables;
+            throw new SafeYaml.Problem("loot.yml 必须包含 dungeons: 配置段；空表请写 dungeons: {}");
         }
         for (String id : dungeons.getKeys(false)) {
             ConfigurationSection section = dungeons.getConfigurationSection(id);
@@ -122,7 +122,37 @@ public final class LootTables {
                 out.add(parsed);
             }
         }
-        return out.isEmpty() ? List.of(bread()) : out;
+        return out;
+    }
+
+    /** 新格式每项 amount 默认 1；保留显式 min/max 供迁移，禁止同一项写两种数量。 */
+    public static List<LootEntry> parseIndependent(List<?> raw) {
+        List<LootEntry> out = new ArrayList<>();
+        if (raw == null) { return out; }
+        for (Object item : raw) {
+            if (!(item instanceof Map<?, ?> map)) {
+                throw new SafeYaml.Problem("独立奖励必须逐项填写 item、amount、chance");
+            }
+            if (map.containsKey("weight")) {
+                throw new SafeYaml.Problem("新格式奖励不使用 weight，请用 chance 填写独立概率");
+            }
+            Map<String, Object> normalized = new LinkedHashMap<>();
+            map.forEach((key, value) -> normalized.put(String.valueOf(key), value));
+            if (map.containsKey("amount") && (map.containsKey("min") || map.containsKey("max"))) {
+                throw new SafeYaml.Problem("amount 与 min/max 不能同时填写");
+            }
+            if (map.containsKey("amount")) {
+                int amount = number(map.get("amount"), 1);
+                if (amount <= 0 || amount > 2304) { throw new SafeYaml.Problem("amount 必须为 1 到 2304 的整数"); }
+                normalized.put("min", amount);
+                normalized.put("max", amount);
+            } else if (!map.containsKey("min") && !map.containsKey("max")) {
+                normalized.put("min", 1);
+                normalized.put("max", 1);
+            }
+            out.add(parseEntry(normalized));
+        }
+        return out;
     }
 
     private static LootEntry bread() {
@@ -132,32 +162,33 @@ public final class LootTables {
     private static LootEntry parseEntry(Object entry) {
         if (entry instanceof String text) {
             Material material = Material.matchMaterial(text.trim());
-            return isAir(material) ? null : new LootEntry(material, 1, 0, 0, 1.0, Map.of(), 0, 0);
+            if (isAir(material)) { throw new SafeYaml.Problem("无法识别的掉落物品：" + text); }
+            return new LootEntry(material, 1, 0, 0, 1.0, Map.of(), 0, 0);
         }
         if (entry instanceof ConfigurationSection section) {
-            return new LootEntry(
-                    material(section.getString("item")),
-                    Math.max(1, section.getInt("weight", 1)),
-                    Math.max(0, section.getInt("min", 0)),
-                    Math.max(0, section.getInt("max", 0)),
-                    clampChance(section.getDouble("chance", 1.0)),
-                    enchants(section.get("enchants")),
-                    randomCount(section.get("random-enchants"))[0],
-                    randomCount(section.get("random-enchants"))[1]);
+            return parseEntry(section.getValues(false));
         }
         if (entry instanceof Map<?, ?> map) {
             int[] random = randomCount(map.get("random-enchants"));
+            int weight = number(map.get("weight"), 1);
+            int min = number(map.get("min"), 0);
+            int max = number(map.get("max"), 0);
+            if (weight <= 0 || min < 0 || max < 0 || (max > 0 && max < min) || max > 2304 || min > 2304) {
+                throw new SafeYaml.Problem("掉落权重须大于 0；数量须为 0 到 2304 且 max 不小于 min");
+            }
+            Object chanceRaw = map.get("chance");
+            if (chanceRaw != null && !(chanceRaw instanceof Number)) {
+                throw new SafeYaml.Problem("chance 须填写 0 到 1 的数字，例如 0.3");
+            }
             return new LootEntry(
                     material(map.get("item") == null ? null : String.valueOf(map.get("item"))),
-                    Math.max(1, number(map.get("weight"), 1)),
-                    Math.max(0, number(map.get("min"), 0)),
-                    Math.max(0, number(map.get("max"), 0)),
+                    weight, min, max,
                     clampChance(map.get("chance") instanceof Number value ? value.doubleValue() : 1.0),
                     enchants(map.get("enchants")),
                     random[0],
                     random[1]);
         }
-        return null;
+        throw new SafeYaml.Problem("掉落条目必须是物品名或键值表");
     }
 
     /**
@@ -224,7 +255,8 @@ public final class LootTables {
 
     private static Material material(String name) {
         Material material = name == null ? null : Material.matchMaterial(name.trim());
-        return isAir(material) ? Material.BREAD : material;
+        if (isAir(material)) { throw new SafeYaml.Problem("无法识别的掉落物品：" + name); }
+        return material;
     }
 
     /**
@@ -239,10 +271,18 @@ public final class LootTables {
     }
 
     private static int number(Object raw, int fallback) {
-        return raw instanceof Number value ? value.intValue() : fallback;
+        if (raw == null) { return fallback; }
+        if (!(raw instanceof Number value) || !Double.isFinite(value.doubleValue())
+                || value.doubleValue() != value.intValue()) {
+            throw new SafeYaml.Problem("需要整数，实际填写为：" + raw);
+        }
+        return value.intValue();
     }
 
     private static double clampChance(double value) {
-        return Math.max(0, Math.min(1, value));
+        if (!Double.isFinite(value) || value < 0 || value > 1) {
+            throw new SafeYaml.Problem("chance 必须是 0 到 1 的有限数字");
+        }
+        return value;
     }
 }
