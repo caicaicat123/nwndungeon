@@ -11,6 +11,17 @@ import org.bukkit.boss.BarColor;
 public final class MobHealth {
     private MobHealth() { }
 
+    /** 仅用于新首领的短暂出生初始化；真实伤害发生后永久切换为保留剩余血量。 */
+    public static final class SpawnState {
+        private boolean damaged;
+        public void damaged() { damaged = true; }
+        public void reconcile(LivingEntity entity, double configuredMaximum) {
+            if (MythicMobsSupport.managed(entity)) { return; }
+            if (damaged) { synchronizeMaximum(entity, configuredMaximum); }
+            else { apply(entity, configuredMaximum); }
+        }
+    }
+
     public static double read(ConfigurationSection section, String path, double fallback) {
         Object raw = section.get(path);
         if (raw == null) { return fallback; }
@@ -91,6 +102,15 @@ public final class MobHealth {
         }
         AttributeInstance attribute = entity.getAttribute(Attribute.GENERIC_MAX_HEALTH);
         double actualMaximum = attribute == null ? Double.NaN : attribute.getValue();
+        if (MythicMobsSupport.managed(entity)) {
+            if (!Double.isFinite(actualMaximum) || actualMaximum <= 0) {
+                throw new MobSpawner.Failure("神话首领没有有效最大生命值");
+            }
+            configuredMaximum = actualMaximum; // 包括Mythic技能动态改变上限的情况；只读，不回写。
+            if (entity.getCustomName() != null && !entity.getCustomName().isBlank()) {
+                name = org.bukkit.ChatColor.stripColor(entity.getCustomName());
+            }
+        }
         if (!Double.isFinite(actualMaximum) || !close(actualMaximum, configuredMaximum)) {
             synchronizeMaximum(entity, configuredMaximum);
         }

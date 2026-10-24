@@ -387,9 +387,8 @@ public final class EditorPanel {
             }
         }
         player.openInventory(inventory);
-        player.sendMessage("§7把要发的东西放进这个箱子，§f关掉界面§7就会写进 loot.yml 的 §f"
-                + "dungeons." + dungeonName + "."
-                + ("reward".equalsIgnoreCase(kind) ? "reward-chest" : "supply-chest")
+        player.sendMessage("§7把要发的东西放进这个箱子，§f关掉界面§7就会保存到 §f"
+                + plugin.lootConfigFile(dungeonName).getName()
                 + "§7；权重/数量之后在 yml 里调。");
     }
 
@@ -447,7 +446,7 @@ public final class EditorPanel {
                 Component.text("同一扇门不能既是关卡门又是出口门", NamedTextColor.DARK_GRAY)));
         inventory.setItem(12, icon(Material.CHEST, Component.text("6. 箱子", NamedTextColor.GREEN),
                 Component.text("看着箱子点「补给箱/奖励箱」→ 放东西", NamedTextColor.GRAY),
-                Component.text("关掉界面就写进 loot.yml", NamedTextColor.DARK_GRAY)));
+                Component.text("关掉界面就保存副本奖励配置", NamedTextColor.DARK_GRAY)));
         inventory.setItem(14, icon(Material.LIME_DYE, Component.text("7. 保存", NamedTextColor.GREEN),
                 Component.text("点「保存」把编辑世界搬成模板", NamedTextColor.GRAY)));
         inventory.setItem(16, icon(Material.KNOWLEDGE_BOOK, Component.text("要点", NamedTextColor.YELLOW),
@@ -658,12 +657,14 @@ public final class EditorPanel {
             }
         }
         String key = "reward".equalsIgnoreCase(holder.rewardKind) ? "reward-chest" : "supply-chest";
-        int written = LootWriter.write(plugin, holder.dungeonName, key, items);
+        int written;
+        try { written = LootWriter.write(plugin, holder.dungeonName, key, items); }
+        catch (RuntimeException e) { player.sendMessage("§c奖励未保存：" + e.getMessage() + "；请先重载配置再编辑。"); return true; }
         if (items.isEmpty()) {
-            player.sendMessage("§7箱子是空的 → 已把 loot.yml 里 " + holder.dungeonName + "." + key + " 清掉。");
+            player.sendMessage("§7箱子是空的 → 已清空 " + plugin.lootConfigFile(holder.dungeonName).getName() + " 的对应奖励池。");
         } else {
-            player.sendMessage("§a已把 " + written + " 项写进 loot.yml（"
-                    + holder.dungeonName + "." + key + "）。§7权重/数量去那个文件里调。");
+            player.sendMessage("§a已把 " + written + " 项保存到 " + plugin.lootConfigFile(holder.dungeonName).getName()
+                    + "。§7权重/数量去该文件里调。");
         }
         later(player, () -> openEditor(player));
         return true;

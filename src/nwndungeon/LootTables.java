@@ -80,6 +80,21 @@ public final class LootTables {
         String key = tierId == null ? "" : tierId.toLowerCase(Locale.ROOT);
         return supply.containsKey(key) || reward.containsKey(key);
     }
+    public void overlay(String id, ConfigurationSection section) {
+        String key = id.toLowerCase(Locale.ROOT);
+        if (section.isSet("supply-chest")) {
+            List<?> raw = section.getList("supply-chest");
+            if (raw == null) { throw new SafeYaml.Problem(id + " rewards.supply 必须是列表"); }
+            supply.put(key, raw.isEmpty() ? List.of() : parse(raw)); configuredKeys.add(key + ":supply-chest");
+        }
+        if (section.isSet("reward-chest")) {
+            List<?> raw = section.getList("reward-chest");
+            if (raw == null) { throw new SafeYaml.Problem(id + " rewards.completion 必须是列表"); }
+            reward.put(key, raw.isEmpty() ? List.of() : parse(raw)); configuredKeys.add(key + ":reward-chest");
+        }
+        if (section.isSet("enchant-pool")) { enchantPools.put(key, names(section.getList("enchant-pool"))); }
+        if (section.isSet("enchant-levels")) { enchantLevels.put(key, levelRange(section.getList("enchant-levels"))); }
+    }
 
     /** 配置里是不是真的写了这一栏（{@code supply-chest} / {@code reward-chest}）。 */
     public boolean configured(String dungeonId, String field) {

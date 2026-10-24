@@ -1,8 +1,8 @@
 name: NWNDungeon
-version: 1.5.0
+version: 1.5.1
 main: nwndungeon.NWNDungeon
 api-version: '1.21'
-softdepend: [PlaceholderAPI]
+softdepend: [PlaceholderAPI, MythicMobs]
 description: 随机副本入口与独立副本世界；1.5.0 起支持管理员自建副本（一局一个独立世界）。
 author: 新世界网络
 commands:

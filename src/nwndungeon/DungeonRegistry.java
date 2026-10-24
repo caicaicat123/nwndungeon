@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.HashSet;
 
 /**
  * 自建副本的登记表：{@code dungeons.yml}（每个副本一段配置）＋ {@code registry.yml}（名字 ↔ 世界名 slug）。
@@ -33,9 +34,11 @@ public final class DungeonRegistry {
     private final Map<String, DungeonDef> dungeons = new LinkedHashMap<>();
     private String fileRevision = SafeYaml.MISSING;
     private String registryRevision = SafeYaml.MISSING;
+    private Map<String, DungeonFiles.Document> documents = new LinkedHashMap<>();
 
     public record Pending(YamlConfiguration yaml, YamlConfiguration registry,
-                          Map<String, DungeonDef> definitions, String fileRevision, String registryRevision) { }
+                          Map<String, DungeonDef> definitions, String fileRevision, String registryRevision,
+                          Map<String, DungeonFiles.Document> documents) { }
 
     public DungeonRegistry(NWNDungeon plugin) {
         this(plugin, plugin.getDataFolder());
@@ -58,6 +61,9 @@ public final class DungeonRegistry {
     }
 
     public Pending prepareLoad() {
+        return prepareLoad(DungeonFiles.load(file.getParentFile()));
+    }
+    public Pending prepareLoad(DungeonFiles.Snapshot snapshot) {
         if (!file.exists()) {
             writeDefaultFile();
         }
@@ -91,10 +97,26 @@ public final class DungeonRegistry {
             def.slug = slug;
             next.put(name, def);
         }
+        Map<String, DungeonFiles.Document> sources = new LinkedHashMap<>();
+        for (var doc : snapshot.documents().values()) {
+            if (doc.generated()) { continue; }
+            sources.put(doc.id(), doc);
+            next.remove(doc.id());
+            if (!doc.enabled()) { continue; }
+            DungeonDef def = DungeonDef.from(doc.id(), doc.legacy());
+            String slug = nextRegistry.getString("dungeons." + doc.id() + ".slug");
+            if (slug == null || !Names.isValidWorldName(slug)) {
+                String base = Names.slugOf(doc.id()); slug = base; int suffix = 2;
+                while (next.values().stream().map(d -> d.slug).toList().contains(slug)) { slug = base + "_" + suffix++; }
+            }
+            def.slug = slug; nextRegistry.set("dungeons." + doc.id() + ".slug", slug); next.put(doc.id(), def);
+        }
+        Set<String> slugs = new HashSet<>();
+        for (var def : next.values()) { if (!slugs.add(def.slug.toLowerCase(Locale.ROOT))) { throw new SafeYaml.Problem("世界名重复：" + def.slug); } }
         if (!revisionBefore.equals(SafeYaml.revision(file)) || !registryBefore.equals(SafeYaml.revision(registryFile))) {
             throw new SafeYaml.Problem("读取过程中配置发生变化，请重新重载");
         }
-        return new Pending(nextYaml, nextRegistry, next, revisionBefore, registryBefore);
+        return new Pending(nextYaml, nextRegistry, next, revisionBefore, registryBefore, sources);
     }
 
     public void install(Pending pending) {
@@ -104,6 +126,7 @@ public final class DungeonRegistry {
         dungeons.putAll(pending.definitions());
         fileRevision = pending.fileRevision();
         registryRevision = pending.registryRevision();
+        documents = new LinkedHashMap<>(pending.documents());
         log().info("自建副本 " + dungeons.size() + " 个："
                 + (dungeons.isEmpty() ? "（无）" : String.join("、", dungeons.keySet())));
     }
@@ -123,6 +146,7 @@ public final class DungeonRegistry {
             List<String> lines = List.of(
                     "# 管理员自建副本（v1.5.0）——用 /nwmdungeon edit 打开面板来建；下面的字段手改也行。",
                     "#",
+                    "# 本文件仅用于旧格式兼容；新版请编辑 dungeons/<副本ID>.yml。",
                     "# 名字 = 副本名 = loot.yml 里的段名；磁盘上的世界名（维度键）由 registry.yml 里的 slug",
                     "# 决定，必须是小写 ASCII（中文名当不了世界名，插件会自动生成 slug）。",
                     "#",
@@ -176,26 +200,66 @@ public final class DungeonRegistry {
     public void save() {
             YamlConfiguration next = SafeYaml.parse(yaml.saveToString(), "内存副本定义");
             YamlConfiguration nextRegistry = SafeYaml.parse(registry.saveToString(), "内存副本登记");
+            List<SafeYaml.Write> writes = new ArrayList<>();
+            Map<String, YamlConfiguration> updated = new LinkedHashMap<>();
             for (Map.Entry<String, DungeonDef> entry : dungeons.entrySet()) {
-                ConfigurationSection section = next.getConfigurationSection("dungeons." + entry.getKey());
-                if (section == null) {
-                    section = next.createSection("dungeons." + entry.getKey());
+                if (!documents.containsKey(entry.getKey())) {
+                    ConfigurationSection section = next.getConfigurationSection("dungeons." + entry.getKey());
+                    if (section == null) { section = next.createSection("dungeons." + entry.getKey()); }
+                    entry.getValue().writeTo(section);
                 }
-                entry.getValue().writeTo(section);
                 nextRegistry.set("dungeons." + entry.getKey() + ".slug", entry.getValue().slug);
                 if (!nextRegistry.isSet("dungeons." + entry.getKey() + ".created")) {
                     nextRegistry.set("dungeons." + entry.getKey() + ".created", System.currentTimeMillis());
                 }
             }
-            SafeYaml.saveAll(List.of(new SafeYaml.Write(file, next, fileRevision),
-                    new SafeYaml.Write(registryFile, nextRegistry, registryRevision)));
+            for (var entry : documents.entrySet()) {
+                var doc = entry.getValue();
+                YamlConfiguration output;
+                DungeonDef def = dungeons.get(entry.getKey());
+                if (def != null) { output = DungeonFiles.update(doc, def); }
+                else {
+                    output = SafeYaml.parse(doc.yaml().saveToString(), doc.file().getName());
+                    output.set("enabled", false);
+                }
+                updated.put(entry.getKey(), output);
+                writes.add(new SafeYaml.Write(doc.file(), output, doc.revision()));
+            }
+            writes.add(new SafeYaml.Write(file, next, fileRevision));
+            writes.add(new SafeYaml.Write(registryFile, nextRegistry, registryRevision));
+            SafeYaml.saveAll(writes);
             yaml = next;
             registry = nextRegistry;
             fileRevision = SafeYaml.revision(file);
             registryRevision = SafeYaml.revision(registryFile);
+            updated.forEach((id, value) -> {
+                var old = documents.get(id);
+                documents.put(id, new DungeonFiles.Document(old.file(), SafeYaml.revision(old.file()), value, DungeonFiles.normalize(value)));
+            });
     }
 
     // ---------------------------------------------------------------- 查
+
+    public File lootFile(String id) {
+        var doc = documents.get(id);
+        return doc == null ? new File(file.getParentFile(), "loot.yml") : doc.file();
+    }
+    public boolean saveLoot(String id, String key, List<Map<String, Object>> entries) {
+        var doc = documents.get(id);
+        if (doc == null) { return false; }
+        if (!doc.enabled() || !dungeons.containsKey(id)) { throw new SafeYaml.Problem("副本已禁用或删除：" + id); }
+        String path = switch (key) {
+            case "supply-chest" -> "rewards.supply";
+            case "reward-chest" -> "rewards.completion";
+            default -> throw new SafeYaml.Problem("未知奖励栏目：" + key);
+        };
+        YamlConfiguration updated = SafeYaml.parse(doc.yaml().saveToString(), doc.file().getName());
+        updated.set(path, entries);
+        YamlConfiguration normalized = DungeonFiles.normalize(updated);
+        SafeYaml.save(doc.file(), updated, doc.revision());
+        documents.put(id, new DungeonFiles.Document(doc.file(), SafeYaml.revision(doc.file()), updated, normalized));
+        return true;
+    }
 
     public Collection<DungeonDef> all() {
         return dungeons.values();
@@ -308,9 +372,17 @@ public final class DungeonRegistry {
         }
         DungeonDef def = new DungeonDef(name);
         def.slug = allocateSlug(name);
+        YamlConfiguration old = new YamlConfiguration(); def.writeTo(old);
+        YamlConfiguration fresh = DungeonFiles.export(name, false, old, null);
+        DungeonDef configured = DungeonDef.from(name, DungeonFiles.normalize(fresh));
+        configured.slug = def.slug; def = configured;
+        var previous = documents.get(name);
+        File destination = previous == null ? new File(file.getParentFile(), "dungeons/" + def.slug + ".yml") : previous.file();
+        if (previous == null && destination.exists()) { throw new SafeYaml.Problem("不覆盖已有配置：" + destination); }
+        documents.put(name, new DungeonFiles.Document(destination, previous == null ? SafeYaml.MISSING : previous.revision(), fresh, DungeonFiles.normalize(fresh)));
         dungeons.put(name, def);
         try { save(); }
-        catch (SafeYaml.Problem failure) { dungeons.remove(name); throw failure; }
+        catch (SafeYaml.Problem failure) { dungeons.remove(name); if (previous == null) { documents.remove(name); } else { documents.put(name, previous); } throw failure; }
         log().info("新建自建副本「" + name + "」，世界名 " + def.slug);
         return def;
     }

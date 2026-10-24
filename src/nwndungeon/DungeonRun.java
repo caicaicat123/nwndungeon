@@ -106,6 +106,7 @@ public final class DungeonRun {
         public final Map<UUID, Integer> missingSeconds = new HashMap<>();
         public UUID bossId;
         public LivingEntity bossEntity;
+        public boolean mythicBoss;
         public RuntimeException lastBossFailure;
         public final SpawnRecovery bossRecovery = new SpawnRecovery();
         public final Map<UUID, LivingEntity> entities = new HashMap<>();
@@ -343,6 +344,9 @@ public final class DungeonRun {
     }
 
     public void begin() {
+        if (def.structuredConfig && def.stages.size() != def.markers.stageCount()) {
+            throw new MobSpawner.Failure("新版rooms数量 " + def.stages.size() + " 与地图标记关卡数 " + def.markers.stageCount() + " 不一致，请检查关卡门和rooms配置");
+        }
         // 先把这一局用到的区块钉住：玩家走得慢也不会让远处的怪被卸载（"刷没"的根源）
         keepChunksLoaded();
         Markers markers = def.markers;
@@ -384,6 +388,7 @@ public final class DungeonRun {
 
     /** 把关卡与阵容、刷怪点配对起来。 */
     private void buildWaves(Stage stage, Markers markers) {
+        if (stage.bossStage && MythicMobsSupport.reference(def.boss.type)) { MobSpawner.resolve(def.boss.type); }
         List<String> specs = new ArrayList<>();
         DungeonDef.Stage configured = def.stage(stage.index);
         if (stage.bossStage) {
@@ -449,15 +454,16 @@ public final class DungeonRun {
         if (parsed.size() != tokens) { throw new MobSpawner.Failure("阵容格式错误：" + spec); }
         for (WaveSpec.Item item : parsed) {
             String name = item.name();
-            MobTemplate template = plugin.mobTemplate(name.toLowerCase(Locale.ROOT));
-            EntityType type = template != null ? template.type() : entityType(name);
+            boolean mythic = MythicMobsSupport.reference(name);
+            MobTemplate template = mythic ? null : plugin.mobTemplate(name.toLowerCase(Locale.ROOT));
+            EntityType type = template != null ? template.type() : MobSpawner.resolve(name);
             if (!MobSpawner.supported(type) || item.count() > MobSpawner.MAX_WAVE_SIZE
                     || types.size() + item.count() > MobSpawner.MAX_WAVE_SIZE) {
                 throw new MobSpawner.Failure("无效的怪物或数量：" + name + ":" + item.count());
             }
             for (int i = 0; i < item.count(); i++) {
                 types.add(type);
-                templates.add(template == null ? null : template.id());
+                templates.add(mythic ? name : template == null ? null : template.id());
             }
         }
     }
@@ -509,14 +515,16 @@ public final class DungeonRun {
                         : spots.get(i % spots.size());
                 keepAt(spot);
                 String templateId = templates.get(i);
-                MobTemplate template = templateId == null ? null : plugin.mobTemplate(templateId);
+                boolean mythic = MythicMobsSupport.reference(templateId);
+                MobTemplate template = templateId == null || mythic ? null : plugin.mobTemplate(templateId);
                 java.util.function.Consumer<LivingEntity> configure = living -> {
                     if (template != null) {
                         template.apply(living);
                         plugin.tagMob(living, template.id());
                     }
                 };
-                LivingEntity entity = MobSpawner.spawn(world, spot, types.get(i), configure);
+                LivingEntity entity = mythic ? MobSpawner.spawn(world, spot, templateId, null, point -> true)
+                        : MobSpawner.spawn(world, spot, types.get(i), configure);
                 stage.mobs.add(entity.getUniqueId());
                 stage.entities.put(entity.getUniqueId(), entity);
                 stage.mobRecovery.put(entity.getUniqueId(), new MobRecovery(entity, configure, point -> true));
@@ -556,10 +564,13 @@ public final class DungeonRun {
         keepAt(center);
         // 首领标记点底下可能是洞 / 悬空（自建副本里标记是手放的）→ 先找一块站得住的地。
         // 否则它一出来就掉出世界：玩家看到"boss 自己消失了"，插件却收到死亡事件直接结算。
-        MobTemplate template = plugin.mobTemplate(def.boss.type.toLowerCase(Locale.ROOT));
-        EntityType type = template != null ? template.type() : entityType(def.boss.type);
-        LivingEntity boss = MobSpawner.spawn(world, center, type, entity -> configureBoss(entity, template));
+        boolean mythic = MythicMobsSupport.reference(def.boss.type);
+        MobTemplate template = mythic ? null : plugin.mobTemplate(def.boss.type.toLowerCase(Locale.ROOT));
+        LivingEntity boss = mythic ? MobSpawner.spawn(world, center, def.boss.type, null, point -> true)
+                : MobSpawner.spawn(world, center, template != null ? template.type() : MobSpawner.resolve(def.boss.type),
+                        entity -> configureBoss(entity, template));
         stage.bossEntity = boss;
+        stage.mythicBoss = MythicMobsSupport.managed(boss);
         stage.bossId = boss.getUniqueId();
         stage.bossKilled = false;
         stage.lastBossFailure = null;
@@ -567,6 +578,10 @@ public final class DungeonRun {
         stage.entities.put(boss.getUniqueId(), boss);
         stage.lastSeen.put(boss.getUniqueId(), boss.getLocation().clone());
         stage.missingSeconds.remove(boss.getUniqueId());
+        plugin.initializeBossHealth(boss, def.boss.health,
+                () -> !closed && failure == null && !stage.cleared && boss.getUniqueId().equals(stage.bossId)
+                        && stage.bossEntity == boss,
+                this::refreshBar, e -> fail("首领出生血量初始化失败：" + e.getMessage(), e));
         announce("§5[副本]§r §c" + stripColor(def.boss.name) + " §r登场了！");
         refreshBar();
     }
@@ -581,6 +596,10 @@ public final class DungeonRun {
             boss.setCustomNameVisible(true);
         }
         MobHealth.apply(boss, def.boss.health);
+        if (def.boss.attributes != null) {
+            def.boss.attributes.apply(boss);
+            if (!def.boss.attributes.legacyStrength()) { return; }
+        }
         try {
             boss.addPotionEffect(new PotionEffect(PotionEffectType.STRENGTH, Integer.MAX_VALUE, 1, false, false));
             boss.addPotionEffect(new PotionEffect(PotionEffectType.RESISTANCE, Integer.MAX_VALUE, 1, false, false));
@@ -728,6 +747,7 @@ public final class DungeonRun {
                     stage.bossId == null ? stageAnchor(stage) : stage.lastSeen.get(stage.bossId));
             if (living != null) {
                 stage.bossEntity = living;
+                stage.mythicBoss |= MythicMobsSupport.managed(living);
                 stage.bossRecovery.found();
                 stage.lastSeen.put(stage.bossId, living.getLocation().clone());
                 if (!stage.mobs.contains(stage.bossId)) {
@@ -747,6 +767,9 @@ public final class DungeonRun {
                 fail("首领恢复失败，已尝试 " + stage.bossRecovery.attempts() + " 次；最后原因："
                         + (stage.lastBossFailure == null ? "实体持续失踪" : stage.lastBossFailure.getMessage()), stage.lastBossFailure);
             } else if (decision == SpawnRecovery.Decision.RETRY) {
+                if (stage.bossId != null && stage.mythicBoss) {
+                    throw new MobSpawner.Failure("神话首领持续失踪，无法安全重建技能阶段；本局异常结束，不判通关");
+                }
                 if (stage.bossId != null) {
                     stage.mobs.remove(stage.bossId);
                     stage.entities.remove(stage.bossId);
@@ -1084,7 +1107,9 @@ public final class DungeonRun {
                 player.sendTitle("§e下一波 3 秒后", "§7第 " + (stage.index + 1) + " 关 · " + wave, 5, 40, 10);
                 player.playSound(player.getLocation(), Sound.BLOCK_BEACON_ACTIVATE, 0.7f, 1.4f);
             } else {
-                player.sendTitle("§c" + wave, "§7第 " + (stage.index + 1) + " 关", 5, 30, 10);
+                DungeonDef.Stage configured = def.stage(stage.index);
+                String title = configured != null && !configured.name.isBlank() ? configured.name : "§c" + wave;
+                player.sendTitle(waveIndex == 0 ? title : "§c" + wave, "§7第 " + (stage.index + 1) + " 关", 5, 30, 10);
                 player.playSound(player.getLocation(), Sound.ENTITY_ENDERMAN_TELEPORT, 0.8f, 0.8f);
             }
         }
@@ -1206,14 +1231,14 @@ public final class DungeonRun {
             stage.wavePending = false;
             for (LivingEntity entity : stage.entities.values()) {
                 PlayerHits.forget(entity);
-                if (!entity.isDead()) { entity.remove(); }
+                if (!entity.isDead()) { MythicMobsSupport.remove(entity); }
             }
             stage.entities.clear();
             stage.mobRecovery.clear();
             for (UUID uuid : stage.mobs) {
                 Entity entity = Bukkit.getEntity(uuid);
                 if (entity != null && !(entity instanceof Player)) {
-                    entity.remove();
+                    MythicMobsSupport.remove(entity);
                 }
             }
             stage.mobs.clear();

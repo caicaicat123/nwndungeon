@@ -25,7 +25,12 @@ public record Tier(String id, String display, Material floorBlock, int timeLimit
                    List<List<String>> rooms, String bossType, String bossName, double bossHealth,
                    List<String> bossWaves, String bossGuards,
                    List<LootEntry> supplyItems, List<LootEntry> rewardItems,
-                   int moneyReward, int staminaCost) {
+                   int moneyReward, int staminaCost, List<String> roomNames, BossAttributes bossAttributes) {
+    public Tier(String id, String display, Material block, int minutes, List<List<String>> rooms,
+                String bossType, String bossName, double health, List<String> bossWaves, String guards,
+                List<LootEntry> supply, List<LootEntry> reward, int money, int stamina) {
+        this(id, display, block, minutes, rooms, bossType, bossName, health, bossWaves, guards, supply, reward, money, stamina, List.of(), null);
+    }
 
     public static Tier from(String id, ConfigurationSection section, LootTables loot) {
         Material block = Material.matchMaterial(String.valueOf(section.getString("block", "IRON_BLOCK")));
@@ -34,7 +39,7 @@ public record Tier(String id, String display, Material floorBlock, int timeLimit
                 block == null ? Material.IRON_BLOCK : block,
                 Math.max(1, section.getInt("time-limit-minutes", 20)),
                 readRooms(section.getList("rooms")),
-                section.getString("boss.type", "ZOMBIE").toUpperCase(Locale.ROOT),
+                section.getString("boss.type", "ZOMBIE").trim(),
                 section.getString("boss.name", "§c首领"),
                 MobHealth.read(section, "boss.health", 60),
                 toStrings(section.getList("boss.waves")),
@@ -42,7 +47,8 @@ public record Tier(String id, String display, Material floorBlock, int timeLimit
                 loot != null && loot.has(id) ? loot.supply(id) : LootTables.parse(section.getList("supply-chest")),
                 loot != null && loot.has(id) ? loot.reward(id) : LootTables.parse(section.getList("reward-chest")),
                 Math.max(0, section.getInt("money-reward", 0)),
-                Math.max(0, section.getInt("stamina-cost", 0)));
+                Math.max(0, section.getInt("stamina-cost", 0)), section.getStringList("room-names"),
+                BossAttributes.read(section.getConfigurationSection("boss")));
     }
 
     /** 首领房的波次（每项 = 一波的阵容字符串）：前面几波小怪 + 最后一波（随首领一起登场）。 */

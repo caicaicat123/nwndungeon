@@ -36,6 +36,45 @@ public final class MobSpawner {
                 && org.bukkit.entity.Mob.class.isAssignableFrom(clazz);
     }
 
+    public static EntityType resolve(String name) {
+        if (MythicMobsSupport.reference(name)) { return MythicMobsSupport.type(name); }
+        try {
+            EntityType type = EntityType.valueOf(name.trim().toUpperCase(java.util.Locale.ROOT));
+            if (!supported(type)) { throw new IllegalArgumentException("非战斗怪物"); }
+            return type;
+        } catch (RuntimeException e) { throw new Failure("无效的战斗怪物：" + name, e); }
+    }
+
+    public static LivingEntity spawn(World world, Location at, String reference,
+                                     Consumer<LivingEntity> configure, Predicate<Location> inside) {
+        EntityType type = resolve(reference);
+        if (!MythicMobsSupport.reference(reference)) { return spawn(world, at, type, configure, inside); }
+        if (world.getDifficulty() == Difficulty.PEACEFUL) { throw new Failure("和平难度不能生成神话战斗怪"); }
+        LivingEntity shape = null, created = null;
+        try {
+            at.getChunk().load();
+            shape = world.createEntity(at, type.getEntityClass().asSubclass(LivingEntity.class));
+            LivingEntity probe = shape;
+            Location spot = findSafeSpot(world, at, shape.getWidth(), shape.getHeight(),
+                    point -> inside.test(point) && !probe.collidesAt(point));
+            created = MythicMobsSupport.spawn(reference, spot);
+            // 不执行NWNDungeon模板/首领属性回调：Mythic的onSpawn、装备、技能与生命值是完整定义。
+            Location actual = created.getLocation();
+            if (!created.isValid() || created.isDead() || created.getHealth() <= 0
+                    || !world.equals(actual.getWorld()) || !inside.test(actual)
+                    || actual.distanceSquared(spot) > 36 || !clearBody(world, actual, created.getWidth(), created.getHeight())
+                    || created.collidesAt(actual)) { throw new Failure("神话怪生成被取消或生成后位置/体型不安全：" + reference); }
+            if (!MythicMobsSupport.managed(created)) { throw new Failure("神话怪未登记为活动实例：" + reference); }
+            created.setPersistent(true);
+            created.setRemoveWhenFarAway(false);
+            return created;
+        } catch (RuntimeException | LinkageError e) {
+            if (created != null) { MythicMobsSupport.remove(created); }
+            if (e instanceof Failure failure) { throw failure; }
+            throw new Failure("神话怪生成失败：" + reference + "：" + e.getMessage(), e);
+        } finally { if (shape != null) { shape.remove(); } }
+    }
+
     public static LivingEntity spawn(World world, Location at, EntityType type,
                                       Consumer<LivingEntity> configure) {
         return spawn(world, at, type, configure, point -> true);
@@ -81,7 +120,9 @@ public final class MobSpawner {
                 throw new Failure("生成被取消或怪物在生成时失效：" + type + " @ " + spot);
             }
             // CreatureSpawnEvent 在配置回调之后触发，可能把首领属性重置回旧值。
-            if (Double.isFinite(configuredMaximum[0])) { MobHealth.apply(spawned, configuredMaximum[0]); }
+            if (Double.isFinite(configuredMaximum[0]) && !MythicMobsSupport.managed(spawned)) {
+                MobHealth.apply(spawned, configuredMaximum[0]);
+            }
             return spawned;
         } catch (RuntimeException | LinkageError e) {
             if (created[0] != null) { created[0].remove(); }

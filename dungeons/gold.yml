@@ -1,0 +1,142 @@
+# 新版配置：一个副本一个文件。修改后 /nwd reload，新开一局生效。
+schema-version: 2
+id: gold
+kind: generated
+name: §6困难
+icon: IRON_BLOCK
+entrance:
+  block: GOLD_BLOCK
+  # 相对权重：本入口权重 / 所有可用入口权重之和。
+  # 例如10、30、60三种入口，权重10的入口占10/100=10%；不是固定10%。
+  weight: 30
+  random-generation: true
+settings:
+  time-limit-minutes: 15
+  stamina-cost: 33
+  money-reward: 5000
+# id从1连续编号；name是玩家进入这一关时屏幕上的Title。
+# 每项waves是一波；mobs下逐行写 怪物名: 数量。最后一间必须 boss: true。
+# 首领房的waves为前置小怪波，最后自动生成boss.guards和首领本人。
+rooms:
+- id: 1
+  name: 第 1 关
+  waves:
+  - mobs:
+      ZOMBIE: 3
+  - mobs:
+      ZOMBIE: 2
+      SKELETON: 2
+- id: 2
+  name: 第 2 关
+  waves:
+  - mobs:
+      HUSK: 2
+      STRAY: 2
+  - mobs:
+      HUSK: 2
+      STRAY: 2
+- id: 3
+  name: 第 3 关
+  waves:
+  - mobs:
+      ZOMBIE: 3
+      SKELETON: 1
+  - mobs:
+      CREEPER: 3
+      SKELETON: 2
+- id: 4
+  name: 第 4 关
+  waves:
+  - mobs:
+      SPIDER: 4
+  - mobs:
+      HUSK: 3
+      STRAY: 2
+- id: 5
+  name: 首领关
+  boss: true
+  waves:
+  - mobs:
+      HUSK: 2
+  - mobs:
+      STRAY: 2
+# 属性与装备分栏；MYTHIC:ID的属性、装备在MythicMobs中管理。
+boss:
+  type: HUSK
+  name: §6金甲统领
+  guards:
+    HUSK: 3
+    STRAY: 3
+  # 血量单位为点：20点=10颗心；damage为基础攻击力，movement-speed为基础移速。
+  # legacy-strength保留旧版强度/抗性效果；改为false后只使用下方显式属性。
+  attributes:
+    health: 90.0
+    legacy-strength: true
+  # 装备部位：mainhand/offhand/helmet/chestplate/leggings/boots。
+  # 每件物品可加enchants，例如 sharpness: 2；item: AIR 表示明确空手。
+  equipment:
+    mainhand:
+      item: DIAMOND_SWORD
+    helmet:
+      item: DIAMOND_HELMET
+    chestplate:
+      item: DIAMOND_CHESTPLATE
+# supply为关卡补给池，completion为通关奖励池；chance: 0.3表示30%入池概率，之后仍参与weight抽取。
+# 保持原有共享箱子规则，本次仅升级配置格式。
+rewards:
+  supply:
+  - item: GOLDEN_APPLE
+    weight: 2
+  - item: MILK_BUCKET
+    weight: 1
+  - item: COOKED_BEEF
+    weight: 3
+    min: 2
+    max: 4
+  - item: GOLD_INGOT
+    weight: 3
+    min: 1
+    max: 3
+  - item: ARROW
+    weight: 3
+    min: 8
+    max: 16
+  - item: SHIELD
+    weight: 1
+  completion:
+  - item: DIAMOND
+    weight: 3
+    min: 2
+    max: 4
+  - item: NETHERITE_SCRAP
+    weight: 2
+    min: 1
+    max: 3
+  - item: ENCHANTED_BOOK
+    weight: 3
+    random-enchants:
+    - 1
+    - 2
+  - item: ENCHANTED_BOOK
+    weight: 1
+    chance: 0.3
+    enchants:
+      MENDING: 1
+  - item: ENCHANTED_GOLDEN_APPLE
+    weight: 1
+    chance: 0.4
+  - item: DIAMOND_BLOCK
+    weight: 1
+  enchant-pool:
+  - SHARPNESS
+  - PROTECTION
+  - EFFICIENCY
+  - UNBREAKING
+  - FIRE_ASPECT
+  - THORNS
+  - LOOTING
+  - POWER
+  - FEATHER_FALLING
+  enchant-levels:
+  - 2
+  - 3

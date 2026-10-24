@@ -20,12 +20,13 @@ public final class Dungeon {
         public final int index;
         public int displayIndex;          // 给玩家看的房间号：只数"有怪的房间"，第一间有怪的 = 1
         public final List<UUID> mobs = new ArrayList<>();          // 当前这一波的怪
-        public List<List<EntityType>> waves = new ArrayList<>();    // 每波要刷的怪（按顺序）
+        public List<List<String>> waves = new ArrayList<>();    // 原版类型或MYTHIC:ID，顺序保留
         public List<List<TemplateSpawn>> plan = new ArrayList<>();  // 模板副本：按标记点刷怪
         public int waveIndex;             // 当前第几波（0 基）
         public boolean wavePending;       // 正在等下一波刷新（3 秒）
         public UUID bossId;
         public org.bukkit.entity.LivingEntity bossEntity;
+        public boolean mythicBoss;
         public RuntimeException lastBossFailure;
         public final SpawnRecovery bossRecovery = new SpawnRecovery();
         public final Map<UUID, org.bukkit.entity.LivingEntity> entities = new HashMap<>();

@@ -27,6 +27,7 @@ public final class MobRecovery {
             EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS, EquipmentSlot.FEET);
     final SpawnRecovery recovery = new SpawnRecovery();
     private final EntityType type;
+    private String mythicIdentity;
     private final Location origin;
     private final Consumer<LivingEntity> configure;
     private final Predicate<Location> inside;
@@ -64,6 +65,8 @@ public final class MobRecovery {
 
     private void observe(LivingEntity entity) {
         if (entity == null) { return; }
+        String identity = MythicMobsSupport.identity(entity);
+        if (identity != null) { mythicIdentity = identity; }
         // remove() 后引用通常仍可读，优先保留最后一次伤害后的血量；0 不代表已确认击杀。
         double health = entity.getHealth();
         var attribute = entity.getAttribute(Attribute.GENERIC_MAX_HEALTH);
@@ -133,6 +136,9 @@ public final class MobRecovery {
                     + (lastFailure == null ? "" : "，原因：" + lastFailure.getMessage()), lastFailure);
         }
         if (decision != SpawnRecovery.Decision.RETRY) { return null; }
+        if (mythicIdentity != null) {
+            throw new MobSpawner.Failure("神话怪 " + mythicIdentity + " 持续失踪，无法安全重建技能阶段；本局异常结束，不判通关");
+        }
         LivingEntity restored = null;
         try {
             restored = MobSpawner.spawn(world, origin, type, entity -> {

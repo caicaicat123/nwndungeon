@@ -1,8 +1,19 @@
 # 新世界网络副本插件
+# 本文件只放全局设置；关卡、首领和奖励请编辑 dungeons/<副本ID>.yml。
+# 已有服可执行 /nwd migrate，备份后转换；旧格式仍可读取。
+
+# MythicMobs 5.x（可选）：在副本文件的mobs中写 'MYTHIC:SkeletonKing': 1。
+# 首领在副本文件中写 boss.type: 'MYTHIC:SkeletonKing'（ID大小写必须与Mythic一致）。
+# 神话怪的血量、名称、技能、装备和掉落在MythicMobs中配置；副本不覆盖这些属性。
+# 未安装MythicMobs或ID错误会明确失败，不会改刷原版怪，也不会直接算通关。
+
+# 排查首领血量时可开启出生后5秒只读记录；平时关闭，避免持续写日志。
+diagnostics:
+  boss-health-trace: false
 
 # 副本入口只在这些世界里生成
 worlds:
-  - world
+- world
 
 # 入口生成
 generation:
@@ -14,21 +25,14 @@ generation:
   max-y: 120
   # 地表方块必须是这些之一
   ground-blocks:
-    - GRASS_BLOCK
-    - SAND
-    - PODZOL
-    - COARSE_DIRT
-    - STONE
-    - ANDESITE
-    - DIORITE
-    - GRANITE
-  # 先按上面的 1/chance 抽中生成，再按 权重/当前候选总权重 选择入口。
-  # 下面 60+30+10=100，所以钻级占 10/100=10%；总权重变成 110 后就是 10/110。
-  # 自建副本也参与此权重池；weight: 10 不代表固定 10%。
-  difficulty-weights:
-    iron: 60
-    gold: 30
-    diamond: 10
+  - GRASS_BLOCK
+  - SAND
+  - PODZOL
+  - COARSE_DIRT
+  - STONE
+  - ANDESITE
+  - DIORITE
+  - GRANITE
 
 # 触发规则
 trigger:
@@ -50,10 +54,10 @@ stamina:
 
 # 低配服务器优先：内置和自建副本共享名额，准备中的副本也占名额。
 performance:
-  max-active-runs: 2                 # 同时最多 2 局；开本准备始终串行
-  build-operations-per-tick: 2048    # 每 tick 最多处理的内置建造/清理操作数
-  build-budget-ms: 2                # 达到此时间预算就暂停，下一 tick 继续
-  # 单次 Bukkit 操作无法中断；区块提前异步加载，避免集中同步生成新区块。
+  max-active-runs: 2 # 同时最多 2 局；开本准备始终串行
+  build-operations-per-tick: 2048 # 每 tick 最多处理的内置建造/清理操作数
+  build-budget-ms: 2 # 达到此时间预算就暂停，下一 tick 继续
+# 单次 Bukkit 操作无法中断；区块提前异步加载，避免集中同步生成新区块。
 
 instance:
   world: nwndungeon
@@ -63,102 +67,7 @@ instance:
   slot-spacing: 600
   # 玩家离线多久后回收他的槽位（分钟）
   empty-recycle-minutes: 5
-
-# 难度配置
-# rooms 里每一项 = 一个房间；每个房间可以配多波（waves），也可以直接写一条字符串（= 只有一波）
-# 每波格式 "类型:数量,类型:数量"；首领房的 boss.waves 是前面的小怪波，最后一波 = guards + 首领本人
-# 设计思路：近战顶前排、远程给压力、蜘蛛/苦力怕逼你走位
-tiers:
-  iron:
-    display: '§f普通'
-    block: IRON_BLOCK
-    time-limit-minutes: 20
-    # 通关奖励（走服务器经济 eco give <玩家> <数量>）
-    money-reward: 1000
-    # 进本消耗体力：500 点池 → 正好 20 次
-    stamina-cost: 25
-    rooms:
-      - waves:
-          - "ZOMBIE:3"
-          - "ZOMBIE:2"
-      - waves:
-          - "ZOMBIE:3,SKELETON:1"
-          - "ZOMBIE:2,SKELETON:2"
-      - waves:
-          - "ZOMBIE:2,SKELETON:1"
-          - "ZOMBIE:2,SKELETON:2,SPIDER:2"
-    boss:
-      type: ZOMBIE
-      name: '§c腐化首领'
-      health: 60
-      waves:
-        - "ZOMBIE:3"
-        - "SKELETON:2"
-      guards: "ZOMBIE:3,SKELETON:2"
-    # 掉落表在独立文件 plugins/NWNDungeon/loot.yml
-    # （按难度分栏；支持 weight/min/max/chance，以及 enchants 写死附魔 /
-    #  random-enchants 随机附魔 —— 附魔书不会再出现"有名字没附魔"的空书）
-  gold:
-    display: '§6困难'
-    block: GOLD_BLOCK
-    time-limit-minutes: 15
-    money-reward: 5000
-    # 500 点池 → 15 次（每次 33 点，15 次后还剩 5 点）
-    stamina-cost: 33
-    rooms:
-      - waves:
-          - "ZOMBIE:3"
-          - "ZOMBIE:2,SKELETON:2"
-      - waves:
-          - "HUSK:2,STRAY:2"
-          - "HUSK:2,STRAY:2"
-      - waves:
-          - "ZOMBIE:3,SKELETON:1"
-          - "CREEPER:3,SKELETON:2"
-      - waves:
-          - "SPIDER:4"
-          - "HUSK:3,STRAY:2"
-    boss:
-      type: HUSK
-      name: '§6金甲统领'
-      health: 90
-      waves:
-        - "HUSK:2"
-        - "STRAY:2"
-      guards: "HUSK:3,STRAY:3"
-    # 掉落表见 loot.yml
-  diamond:
-    display: '§b噩梦'
-    block: DIAMOND_BLOCK
-    time-limit-minutes: 10
-    money-reward: 20000
-    # 500 点池 → 正好 10 次
-    stamina-cost: 50
-    rooms:
-      - waves:
-          - "HUSK:3"
-          - "HUSK:2,STRAY:3"
-      - waves:
-          - "SKELETON:4"
-          - "WITHER_SKELETON:4"
-      - waves:
-          - "CREEPER:3,SPIDER:2"
-          - "WITHER_SKELETON:4"
-      - waves:
-          - "STRAY:4,HUSK:1"
-          - "CREEPER:3,HUSK:2"
-      - waves:
-          - "SPIDER:3"
-          - "WITHER_SKELETON:5"
-    boss:
-      type: WITHER_SKELETON
-      name: '§b深渊领主'
-      health: 140
-      waves:
-        - "WITHER_SKELETON:2"
-        - "CREEPER:2"
-      guards: "WITHER_SKELETON:4,CREEPER:2"
-    # 掉落表见 loot.yml
+# 掉落表见 loot.yml
 
 # 副本内规则
 rules:
@@ -176,30 +85,25 @@ rules:
   # 登录类命令**必须留着**：掉线接续会把玩家直接放回副本世界，那时 AuthMe 要求先 /login，
   # 要是把 /login 也拦了，人就真的卡在副本里出不来了
   allowed-commands:
-    # 聊天 / 私聊（Essentials）
-    - msg
-    - tell
-    - w
-    - whisper
-    - r
-    - reply
-    - mail
-    # 登录（AuthMe 及其别名）
-    # ⚠️ 这几行是照服务器上真实存在的命令逐个核过的（2026-09-27 用 RCON 试执行确认）：
-    #    login / l / log → /login；register / reg；unregister / unreg；
-    #    changepassword / cp；captcha / verification（同一个验证码命令的两个名字）；
-    #    email（子命令 show/add/change/recover/code/setpassword 不用单列，认根命令名即可）
-    #    实测不存在的别名（verify / addemail / changeemail / setemail）就不用写了
-    #    /logout 也有，但故意不放行：它只会把人变成未登录状态，拦掉不影响自救
-    - login
-    - l
-    - log
-    - register
-    - reg
-    - unregister
-    - unreg
-    - changepassword
-    - cp
-    - captcha
-    - verification
-    - email
+  - msg
+  - tell
+  - w
+  - whisper
+  - r
+  - reply
+  - mail
+  - login
+  - l
+  - log
+  - register
+  - reg
+  - unregister
+  - unreg
+  - changepassword
+  - cp
+  - captcha
+  - verification
+  - email
+# 全局设置在本文件；每个副本的关卡、首领和奖励在 dungeons/<副本ID>.yml。
+# 旧版配置继续可读；升级已有服可执行 /nwd migrate，自动备份后转换。
+schema-version: 2

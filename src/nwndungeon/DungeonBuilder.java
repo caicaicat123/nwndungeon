@@ -58,6 +58,8 @@ public final class DungeonBuilder {
     }
 
     public Dungeon build(World world, int ox, int oy, int oz, Tier tier) {
+        // 在准备阶段验证神话首领引用，避免玩家打到最后一关才发现ID错误。
+        if (MythicMobsSupport.reference(tier.bossType())) { MobSpawner.resolve(tier.bossType()); }
         Dungeon dungeon = new Dungeon();
 
         List<List<String>> specs = new ArrayList<>();
@@ -242,25 +244,26 @@ public final class DungeonBuilder {
     // ---------------------------------------------------------------- 怪物（波次）
 
     /** 把 "ZOMBIE:5,SKELETON:3" 解析成一串实体类型（顺序保留）。 */
-    private static List<EntityType> parseSpec(String spec) {
-        List<EntityType> types = new ArrayList<>();
+    private static List<String> parseSpec(String spec) {
+        List<String> types = new ArrayList<>();
         if (spec == null || spec.isBlank()) {
             return types;
         }
         for (String token : spec.split(",")) {
-            String[] parts = token.trim().split(":");
-            if (parts.length != 2) {
+            int colon = token.lastIndexOf(':');
+            if (colon <= 0) {
                 throw new MobSpawner.Failure("阵容必须写成 怪物:数量：" + token);
             }
             try {
-                EntityType type = EntityType.valueOf(parts[0].trim().toUpperCase(Locale.ROOT));
-                int count = Math.max(0, Integer.parseInt(parts[1].trim()));
+                String reference = token.substring(0, colon).trim();
+                EntityType type = MobSpawner.resolve(reference);
+                int count = Math.max(0, Integer.parseInt(token.substring(colon + 1).trim()));
                 if (!MobSpawner.supported(type) || count <= 0 || count > MobSpawner.MAX_WAVE_SIZE
                         || types.size() + count > MobSpawner.MAX_WAVE_SIZE) {
                     throw new MobSpawner.Failure("无效的怪物类型或数量：" + token);
                 }
                 for (int n = 0; n < count; n++) {
-                    types.add(type);
+                    types.add(reference);
                 }
             } catch (Exception e) {
                 throw new MobSpawner.Failure("阵容配置错误：" + token, e);
@@ -269,14 +272,14 @@ public final class DungeonBuilder {
         return types;
     }
 
-    private static List<List<EntityType>> parseWaves(List<String> specs, boolean bossRoom) {
-        List<List<EntityType>> waves = new ArrayList<>();
+    private static List<List<String>> parseWaves(List<String> specs, boolean bossRoom) {
+        List<List<String>> waves = new ArrayList<>();
         if (specs == null) {
             return waves;
         }
         for (int i = 0; i < specs.size(); i++) {
             String spec = specs.get(i);
-            List<EntityType> types = parseSpec(spec);
+            List<String> types = parseSpec(spec);
             if (!types.isEmpty() || (bossRoom && i == specs.size() - 1)) {
                 waves.add(types);
             } else {
@@ -310,7 +313,7 @@ public final class DungeonBuilder {
         int oz = room.origin.getBlockZ();
         int placed = 0;
         try {
-            for (EntityType type : room.waves.get(waveIndex)) {
+            for (String type : room.waves.get(waveIndex)) {
                 int[] spot = SPOTS.get(placed % SPOTS.size());
                 Location location = new Location(world,
                         rx + spot[0] + 0.5, oy + 1, oz + spot[1] + 0.5);
@@ -372,17 +375,12 @@ public final class DungeonBuilder {
                 : room.origin.clone().add(ROOM / 2.0 + 0.5, 1, ROOM / 2.0 + 0.5);
         // 先给它找一块"能站住"的地 —— 直接往 room.center 刷，遇到房间中央是洞/悬空时，
         // 首领一出来就掉出世界（玩家看到的就是"boss 自己消失了"）。
-        EntityType type;
-        try {
-            type = EntityType.valueOf(tier.bossType());
-        } catch (Exception e) {
-            throw new MobSpawner.Failure("首领类型错误：" + tier.bossType(), e);
-        }
-        LivingEntity boss = MobSpawner.spawn(world, center, type, entity -> configureBoss(entity, tier),
+        LivingEntity boss = MobSpawner.spawn(world, center, tier.bossType(), entity -> configureBoss(entity, tier),
                 point -> insideRoom(room, point));
         room.bossKilled = false;
         room.lastBossFailure = null;
         room.bossEntity = boss;
+        room.mythicBoss = MythicMobsSupport.managed(boss);
         room.bossId = boss.getUniqueId();
         room.mobs.add(boss.getUniqueId());
         room.entities.put(boss.getUniqueId(), boss);
@@ -394,7 +392,11 @@ public final class DungeonBuilder {
         boss.setCustomName(tier.bossName());
         boss.setCustomNameVisible(true);
         MobHealth.apply(boss, tier.bossHealth());
-        if (boss.getEquipment() != null) {
+        if (tier.bossAttributes() != null) {
+            tier.bossAttributes().apply(boss);
+            if (!tier.bossAttributes().legacyStrength()) { return; }
+        }
+        if (tier.bossAttributes() == null && boss.getEquipment() != null) {
             boss.getEquipment().setItemInMainHand(new ItemStack(Material.DIAMOND_SWORD));
             boss.getEquipment().setHelmet(new ItemStack(Material.DIAMOND_HELMET));
             boss.getEquipment().setChestplate(new ItemStack(Material.DIAMOND_CHESTPLATE));

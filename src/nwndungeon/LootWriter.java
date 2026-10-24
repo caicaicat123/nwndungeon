@@ -58,11 +58,13 @@ public final class LootWriter {
             }
             out.add(map);
         }
-        if (out.isEmpty()) {
-            yaml.set(path, null);
-        } else {
-            yaml.set(path, out);
+        if (plugin.writeDungeonLoot(dungeonName, key, out)) {
+            plugin.reloadLoot();
+            plugin.getLogger().info("已把 " + out.size() + " 项写进 " + plugin.lootConfigFile(dungeonName).getName());
+            return out.size();
         }
+        if (out.isEmpty()) { yaml.set(path, null); }
+        else { yaml.set(path, out); }
         SafeYaml.save(file, yaml, revision);
         plugin.reloadLoot();
         plugin.getLogger().info("已把 " + out.size() + " 项写进 loot.yml 的 " + path);

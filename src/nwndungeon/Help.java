@@ -35,6 +35,8 @@ public final class Help {
     }
 
     static {
+        add(ADMIN, "migrate", "/nwd migrate", "无", "nwndungeon.admin",
+                "备份并将旧副本转换到dungeons目录的新格式。", "/nwd migrate", "保留旧文件，不覆盖已有新版文件；新版文件优先生效。");
         // ---------------- 玩家 ----------------
         add(PLAYER, "leave", "/dungeon leave", "无", "nwndungeon.use",
                 "离开当前副本，回到进本前的位置。",
@@ -63,8 +65,8 @@ public final class Help {
                 "强制回收副本槽位，里面的人会被送回入口。",
                 "/dungeon release all", "回收的是内置副本的槽位；自建副本的临时世界用 /nwd end。");
         add(ADMIN, "reload", "/dungeon reload", "无", "nwndungeon.admin",
-                "重载 config.yml / loot.yml / party.yml / mobs.yml。",
-                "/dungeon reload", "不重载 dungeons.yml（自建副本的配置改完用 /nwd reload）。");
+                "重载全局设置、副本文件、怪物模板与奖励配置。",
+                "/dungeon reload", "/dungeon、/nwd、/nwmdungeon是同一套命令；已开局的关卡和首领配置不重置。");
 
         // ---------------- 创作者 ----------------
         add(DEV, "edit", "/nwd edit", "无", "nwndungeon.dev",
@@ -117,9 +119,9 @@ public final class Help {
                 "/nwd new boss", "首领位通常在最后一关（首领区）的中间。");
         add(DEV, "new reward", "/nwd new reward [supply|reward]", "supply（默认）/ reward",
                 "nwndungeon.dev",
-                "看着一个箱子执行 → 记下位置并打开箱子界面，把要发的东西放进去；关掉界面就写进 loot.yml。",
+                "看着一个箱子执行 → 记下位置并打开箱子界面，关闭后保存到对应副本的奖励配置。",
                 "/nwd new reward reward",
-                "物品从 GUI 来、权重/概率从 loot.yml 来；空箱子 = 把这一段清掉。");
+                "新版写副本文件的rewards，旧版写loot.yml；空箱子会清空对应奖励池。");
         add(DEV, "new stage", "/nwd new stage <关卡号>", "关卡号（从 1 开始，不写 = 1）", "nwndungeon.dev",
                 "切换「当前关卡」——之后的刷怪点记到那一关。",
                 "/nwd new stage 2", "关卡数 = 关卡门数 + 1，最后一关是首领区。");

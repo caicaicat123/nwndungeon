@@ -39,6 +39,9 @@ if ($LASTEXITCODE -ne 0) { throw '编译失败' }
 
 Copy-Item (Join-Path $root 'plugin.yml') $classes -Force
 Copy-Item (Join-Path $root 'config.yml') $classes -Force
+if (Test-Path (Join-Path $root 'dungeons')) {
+    Copy-Item (Join-Path $root 'dungeons') $classes -Recurse -Force
+}
 if (Test-Path (Join-Path $root 'mobs.yml')) {
     Copy-Item (Join-Path $root 'mobs.yml') $classes -Force
 }

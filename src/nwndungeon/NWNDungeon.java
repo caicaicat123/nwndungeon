@@ -134,12 +134,15 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
     private double cancelDistance;
     private final Map<Location, Cast> casts = new HashMap<>();
     private final Set<UUID> pendingHealthBars = new HashSet<>();
+    private final Map<UUID, MobHealth.SpawnState> initializingBosses = new HashMap<>();
+    private final Map<UUID, BossHealthTrace> bossHealthTraces = new HashMap<>();
     private final Map<String, MobTemplate> mobTemplates = new LinkedHashMap<>();
     private NamespacedKey mobKey;
     private boolean configurationReady;
 
     @Override
     public void onEnable() {
+        MythicMobsSupport.connect(this);
         configurationReady = false;
         activeConfig = null;
         try {
@@ -221,11 +224,14 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
             cast.bar.removeAll();
         }
         casts.clear();
+        initializingBosses.clear();
+        bossHealthTraces.clear();
         // 撤掉给进行中的副本挂的区块票据，别把区块钉到下一个生命周期（1.4.13）
         if (instances != null) {
             instances.releaseAllTickets();
         }
         if (wasReady) { savePendingDelete(); }
+        MythicMobsSupport.disconnect();
         // 正在编辑的模板世界**不主动卸载**：它有自动保存，下次启动会被搬进
         // templates/_recovered/ 等管理员处理，不会丢
     }
@@ -338,8 +344,29 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
         PanelConfig nextPanel = admin ? PanelConfig.load(this) : panelConfig;
         Map<String, MobTemplate> nextMobs = admin ? MobTemplate.loadAll(this) : null;
         var nextConfig = admin ? SafeYaml.read(new File(getDataFolder(), "config.yml")) : getConfig();
+        DungeonFiles.defaults(this, nextConfig);
+        var documents = DungeonFiles.load(getDataFolder());
+        if (admin) {
+            for (var doc : documents.documents().values()) {
+                if (doc.generated()) {
+                    String path = "tiers." + doc.id().toLowerCase(Locale.ROOT);
+                    if (!doc.enabled()) { nextConfig.set(path, null); }
+                    else {
+                        DungeonFiles.merge(doc.legacy(), nextConfig, path);
+                        nextConfig.set("generation.difficulty-weights." + doc.id().toLowerCase(Locale.ROOT),
+                                doc.yaml().getBoolean("entrance.random-generation", true) ? doc.yaml().getInt("entrance.weight", 10) : 0);
+                    }
+                }
+                if (doc.enabled()) { nextLoot.overlay(doc.id(), doc.legacy()); }
+            }
+        }
         Map<String, Tier> nextTiers = admin ? prepareTiers(nextConfig, nextLoot) : null;
-        DungeonRegistry.Pending pending = dev ? dungeonRegistry.prepareLoad() : null;
+        DungeonRegistry.Pending pending = dev ? dungeonRegistry.prepareLoad(documents) : null;
+        if (nextTiers != null && pending != null) {
+            for (String id : pending.definitions().keySet()) {
+                if (nextTiers.containsKey(id.toLowerCase(Locale.ROOT))) { throw new SafeYaml.Problem("副本ID同时用于程序副本和自建地图：" + id); }
+            }
+        }
         if (admin) {
             lootTables = nextLoot;
             panelConfig = nextPanel;
@@ -352,7 +379,8 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
     }
 
     private String configuredBossHealth() {
-        return tiers.values().stream().map(loaded -> loaded.id() + "=" + loaded.bossHealth())
+        return tiers.values().stream().map(loaded -> loaded.id() + "="
+                        + (MythicMobsSupport.reference(loaded.bossType()) ? "MythicMobs(" + loaded.bossType() + ")" : loaded.bossHealth()))
                 .collect(java.util.stream.Collectors.joining("、"));
     }
 
@@ -364,8 +392,8 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
     private Map<String, Tier> prepareTiers(org.bukkit.configuration.file.FileConfiguration cfg, LootTables loot) {
         Map<String, Tier> prepared = new LinkedHashMap<>();
         ConfigurationSection section = cfg.getConfigurationSection("tiers");
-        if (section == null) { throw new SafeYaml.Problem("config.yml 缺少 tiers 配置段"); }
-        for (String key : section.getKeys(false)) {
+        if (section == null && cfg.getInt("schema-version", 1) != 2) { throw new SafeYaml.Problem("config.yml 缺少 tiers 配置段"); }
+        for (String key : section == null ? Set.<String>of() : section.getKeys(false)) {
             ConfigurationSection tier = section.getConfigurationSection(key);
             if (tier == null) { throw new SafeYaml.Problem("难度配置不是键值表：" + key); }
             prepared.put(key.toLowerCase(Locale.ROOT), Tier.from(key.toLowerCase(Locale.ROOT), tier, loot));
@@ -493,7 +521,8 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
         if (dungeon != null) {
             placeEntrance(dungeon, new Location(world, x, y, z));
         } else {
-            buildEntrance(world, x, y, z, pickTier());
+            String selected = pickTier(world);
+            if (selected != null) { buildEntrance(world, x, y, z, selected); }
         }
     }
 
@@ -510,8 +539,9 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
         }
         List<DungeonDef> candidates = new ArrayList<>();
         List<Integer> weightsOfCandidates = new ArrayList<>();
-        int total = 0;
+        long total = 0;
         for (Map.Entry<String, Integer> entry : weights.entrySet()) {
+            if (!eligibleTier(entry.getKey(), world)) { continue; }
             total += Math.max(0, entry.getValue());
         }
         for (DungeonDef def : dungeonRegistry.all()) {
@@ -532,8 +562,9 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
         if (candidates.isEmpty() || total <= 0) {
             return null;
         }
-        int roll = random.nextInt(total);
+        long roll = random.nextLong(total);
         for (Map.Entry<String, Integer> entry : weights.entrySet()) {
+            if (!eligibleTier(entry.getKey(), world)) { continue; }
             roll -= Math.max(0, entry.getValue());
             if (roll < 0) {
                 return null;   // 落在内置难度那一档
@@ -548,19 +579,22 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
         return null;
     }
 
-    private String pickTier() {
-        if (weights.isEmpty()) {
-            return "iron";
-        }
-        int total = weights.values().stream().mapToInt(Integer::intValue).sum();
-        int roll = random.nextInt(Math.max(1, total));
+    private boolean eligibleTier(String id, World world) {
+        List<String> allowed = getConfig().getStringList("tiers." + id + ".entrance.worlds");
+        return tier(id) != null && (allowed.isEmpty() || allowed.contains(world.getName()));
+    }
+    private String pickTier(World world) {
+        long total = weights.entrySet().stream().filter(e -> eligibleTier(e.getKey(), world)).mapToLong(e -> Math.max(0, e.getValue())).sum();
+        if (total <= 0) { return null; }
+        long roll = random.nextLong(total);
         for (Map.Entry<String, Integer> entry : weights.entrySet()) {
-            roll -= entry.getValue();
+            if (!eligibleTier(entry.getKey(), world)) { continue; }
+            roll -= Math.max(0, entry.getValue());
             if (roll < 0) {
                 return entry.getKey();
             }
         }
-        return weights.keySet().iterator().next();
+        return null;
     }
 
     /** 生成一处入口：按难度生成"遗迹"建筑 + 带标记的铁门 + 难度方块（门上/门下各一块）+ 台座按钮 + 告示牌。 */
@@ -1134,12 +1168,97 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onBossDamage(org.bukkit.event.entity.EntityDamageEvent event) {
-        if (event.getEntity() instanceof LivingEntity entity) { queueBossBar(entity); }
+        if (event.getEntity() instanceof LivingEntity entity) {
+            MobHealth.SpawnState birth = initializingBosses.get(entity.getUniqueId());
+            if (birth != null && !event.isCancelled() && event.getFinalDamage() > 0) { birth.damaged(); }
+            BossHealthTrace trace = bossHealthTraces.get(entity.getUniqueId());
+            if (trace != null && !event.isCancelled()) { trace.damage(event, entity); }
+            queueBossBar(entity);
+        }
+    }
+
+    /** 兼容生成后下一tick才写入的属性/血量；只检查两次，战斗伤害发生后绝不补满。 */
+    public void initializeBossHealth(LivingEntity entity, double maximum,
+                                     java.util.function.BooleanSupplier active, Runnable refresh,
+                                     java.util.function.Consumer<RuntimeException> failed) {
+        if (MythicMobsSupport.managed(entity)) {
+            getLogger().info("首领已由 " + MythicMobsSupport.identity(entity) + " 管理；实际血量 " + entity.getHealth()
+                    + " / " + entity.getAttribute(org.bukkit.attribute.Attribute.GENERIC_MAX_HEALTH).getValue()
+                    + "，副本 boss.health=" + maximum + " 不覆盖神话定义");
+        }
+        UUID uuid = entity.getUniqueId();
+        MobHealth.SpawnState birth = new MobHealth.SpawnState();
+        initializingBosses.put(uuid, birth);
+        BossHealthTrace trace = startBossHealthTrace(entity, maximum, active);
+        try {
+            for (int delay = 1; delay <= 2; delay++) {
+                boolean last = delay == 2;
+                Bukkit.getScheduler().runTaskLater(this, () -> {
+                    if (initializingBosses.get(uuid) != birth) { return; }
+                    try {
+                        if (!active.getAsBoolean() || !entity.isValid() || entity.isDead() || entity.getHealth() <= 0) {
+                            initializingBosses.remove(uuid, birth);
+                            return;
+                        }
+                        if (trace != null) { trace.sample(last ? "tick-2-before" : "tick-1-before", entity); }
+                        birth.reconcile(entity, maximum);
+                        if (trace != null) { trace.sample(last ? "tick-2-after" : "tick-1-after", entity); }
+                        refresh.run();
+                    } catch (RuntimeException e) {
+                        initializingBosses.remove(uuid, birth);
+                        failed.accept(e);
+                    } finally {
+                        if (last) { initializingBosses.remove(uuid, birth); }
+                    }
+                }, delay);
+            }
+        } catch (RuntimeException e) {
+            initializingBosses.remove(uuid, birth);
+            throw e;
+        }
+    }
+
+    private BossHealthTrace startBossHealthTrace(LivingEntity entity, double maximum,
+                                                 java.util.function.BooleanSupplier active) {
+        // 离线桩没有JavaPlugin数据目录；生产实例始终有目录。
+        if (getDataFolder() == null || !getConfig().getBoolean("diagnostics.boss-health-trace", false)) { return null; }
+        UUID uuid = entity.getUniqueId();
+        BossHealthTrace trace = new BossHealthTrace(this, maximum);
+        bossHealthTraces.put(uuid, trace);
+        trace.sample("registered", entity);
+        try {
+            for (int delay : new int[]{5, 10, 20, 40, 100}) {
+                Bukkit.getScheduler().runTaskLater(this, () -> {
+                    if (bossHealthTraces.get(uuid) != trace) { return; }
+                    try {
+                        if (!active.getAsBoolean() || !entity.isValid() || entity.isDead()) {
+                            trace.sample("closed-before-tick-" + delay, entity);
+                            bossHealthTraces.remove(uuid, trace);
+                            return;
+                        }
+                        trace.sample("tick-" + delay, entity);
+                    } catch (RuntimeException e) {
+                        bossHealthTraces.remove(uuid, trace);
+                        getLogger().warning("首领血量只读追踪停止：" + e.getMessage());
+                    } finally {
+                        if (delay == 100) { bossHealthTraces.remove(uuid, trace); }
+                    }
+                }, delay);
+            }
+        } catch (RuntimeException e) {
+            bossHealthTraces.remove(uuid, trace);
+            getLogger().warning("首领血量只读追踪调度失败：" + e.getMessage());
+        }
+        return trace;
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onBossHeal(org.bukkit.event.entity.EntityRegainHealthEvent event) {
-        if (event.getEntity() instanceof LivingEntity entity) { queueBossBar(entity); }
+        if (event.getEntity() instanceof LivingEntity entity) {
+            BossHealthTrace trace = bossHealthTraces.get(entity.getUniqueId());
+            if (trace != null && !event.isCancelled()) { trace.heal(event, entity); }
+            queueBossBar(entity);
+        }
     }
 
     /** 伤害/治疗事件发生时生命值尚未写入，下一 tick 读取；同一首领每 tick 最多排一次。 */
@@ -1461,6 +1580,12 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
         }
         if (sub.equals("reload")) {
             reloadEverything(sender);
+            return true;
+        }
+        if (sub.equals("migrate")) {
+            if (!perm(sender, "admin")) { return true; }
+            try { sender.sendMessage("§a" + DungeonFiles.migrate(this)); reloadEverything(sender); }
+            catch (RuntimeException e) { sender.sendMessage("§c转换失败，原配置保留：" + e.getMessage()); }
             return true;
         }
         if (args.length == 0) {
@@ -1799,7 +1924,7 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
         if (args.length == 1) {
             String prefix = args[0].toLowerCase(Locale.ROOT);
             List<String> all = new ArrayList<>(Arrays.asList("spawn", "test", "leave", "list",
-                    "locate", "tp", "release", "stamina", "help", "reload"));
+                    "locate", "tp", "release", "stamina", "help", "reload", "migrate"));
             if (perm(sender, "dev")) {
                 all.addAll(Arrays.asList("edit", "new", "delete", "end", "doctor"));
             }
@@ -1833,8 +1958,14 @@ public final class NWNDungeon extends JavaPlugin implements Listener, CommandExe
 
     /** 重新读一遍 loot.yml（编辑器写完奖励箱之后调用）。 */
     public void reloadLoot() {
-        lootTables = LootTables.load(this);
+        LootTables next = LootTables.load(this);
+        for (var doc : DungeonFiles.load(getDataFolder()).documents().values()) {
+            if (doc.enabled()) { next.overlay(doc.id(), doc.legacy()); }
+        }
+        lootTables = next;
     }
+    public boolean writeDungeonLoot(String id, String key, List<Map<String, Object>> entries) { return dungeonRegistry.saveLoot(id, key, entries); }
+    public File lootConfigFile(String id) { return dungeonRegistry.lootFile(id); }
 
     public String instanceWorldName() {
         return instanceWorld;

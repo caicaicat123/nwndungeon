@@ -19,11 +19,24 @@ public final class FailureDiagnostics {
     }
 
     static synchronized void append(File folder, String context, String reason, Throwable cause) throws IOException {
+        appendNamed(folder, "failures", context, reason, cause);
+    }
+
+    public static void bossHealth(NWNDungeon plugin, String context, String detail) {
+        try { appendBossHealth(plugin.getDataFolder(), context, detail); }
+        catch (IOException e) { plugin.getLogger().warning("首领血量追踪日志写入失败：" + e.getMessage()); }
+    }
+
+    static synchronized void appendBossHealth(File folder, String context, String detail) throws IOException {
+        appendNamed(folder, "boss-health", context, detail, null);
+    }
+
+    private static void appendNamed(File folder, String name, String context, String reason, Throwable cause) throws IOException {
         var directory = folder.toPath().resolve("diagnostics");
         Files.createDirectories(directory);
-        var file = directory.resolve("failures.log");
+        var file = directory.resolve(name + ".log");
         if (Files.exists(file) && Files.size(file) >= 1024 * 1024) {
-            Files.move(file, directory.resolve("failures.previous.log"), StandardCopyOption.REPLACE_EXISTING);
+            Files.move(file, directory.resolve(name + ".previous.log"), StandardCopyOption.REPLACE_EXISTING);
         }
         String trace = "";
         if (cause != null) {

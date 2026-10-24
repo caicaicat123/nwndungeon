@@ -465,7 +465,7 @@ public final class Instances {
         for (Entity entity : world.getNearbyEntities(center,
                 maxLength / 2.0 + 20, 20, DungeonBuilder.ROOM / 2.0 + 20)) {
             if (!(entity instanceof Player)) {
-                entity.remove();
+                MythicMobsSupport.remove(entity);
             }
         }
     }
@@ -494,7 +494,7 @@ public final class Instances {
                 Math.abs(max.getBlockY() - min.getBlockY()) / 2.0 + 2,
                 Math.abs(max.getBlockZ() - min.getBlockZ()) / 2.0 + 2)) {
             if (!(entity instanceof Player)) {
-                entity.remove();
+                MythicMobsSupport.remove(entity);
             }
         }
     }
@@ -758,6 +758,7 @@ public final class Instances {
                     room.bossId == null ? room.center : room.lastSeen.get(room.bossId));
             if (living != null) {
                 room.bossEntity = living;
+                room.mythicBoss |= MythicMobsSupport.managed(living);
                 room.bossRecovery.found();
                 room.lastSeen.put(room.bossId, living.getLocation().clone());
                 if (!room.mobs.contains(room.bossId)) {
@@ -775,6 +776,9 @@ public final class Instances {
                 fail(slot, "首领恢复失败，已尝试 " + room.bossRecovery.attempts() + " 次；最后原因："
                         + (room.lastBossFailure == null ? "实体持续失踪" : room.lastBossFailure.getMessage()), room.lastBossFailure);
             } else if (decision == SpawnRecovery.Decision.RETRY) {
+                if (room.bossId != null && room.mythicBoss) {
+                    throw new MobSpawner.Failure("神话首领持续失踪，无法安全重建技能阶段；本局异常结束，不判通关");
+                }
                 if (room.bossId != null) {
                     room.mobs.remove(room.bossId);
                     room.entities.remove(room.bossId);
@@ -783,6 +787,7 @@ public final class Instances {
                 room.bossRespawns = room.bossRecovery.attempts();
                 try {
                     DungeonBuilder.spawnBoss(world, room, tierFor(slot));
+                    initializeBossHealth(slot, room);
                     plugin.getLogger().warning("首领恢复第 " + room.bossRespawns + " 次成功；仍需有效击杀");
                 } catch (RuntimeException e) {
                     room.lastBossFailure = e;
@@ -801,6 +806,9 @@ public final class Instances {
         if (!slot.busy || slot.failure != null) { return; }
         try {
             DungeonBuilder.spawnWave(world, room, wave, tierFor(slot));
+            if (room.bossRoom && wave == room.waves.size() - 1 && room.lastBossFailure == null) {
+                initializeBossHealth(slot, room);
+            }
             if (room.lastBossFailure != null) {
                 plugin.getLogger().warning("首领首次生成失败，进入恢复等待：" + room.lastBossFailure.getMessage());
                 FailureDiagnostics.record(plugin, "首领首次生成失败 槽位#" + slot.index + " 难度=" + slot.tier
@@ -811,6 +819,16 @@ public final class Instances {
         } catch (RuntimeException e) {
             fail(slot, "第 " + room.displayIndex + " 间生成失败：" + e.getMessage(), e);
         }
+    }
+
+    private void initializeBossHealth(Slot slot, Dungeon.Room room) {
+        LivingEntity boss = room.bossEntity;
+        if (boss == null) { return; }
+        UUID uuid = boss.getUniqueId();
+        plugin.initializeBossHealth(boss, tierFor(slot).bossHealth(),
+                () -> slot.busy && slot.failure == null && !room.cleared && uuid.equals(room.bossId)
+                        && room.bossEntity == boss,
+                () -> refreshBar(slot), e -> fail(slot, "首领出生血量初始化失败：" + e.getMessage(), e));
     }
 
     private void fail(Slot slot, String reason) {
@@ -838,7 +856,9 @@ public final class Instances {
                 player.sendTitle("§e下一波 3 秒后", "§7第 " + room.displayIndex + " 间 · " + wave, 5, 40, 10);
                 player.playSound(player.getLocation(), Sound.BLOCK_BEACON_ACTIVATE, 0.7f, 1.4f);
             } else {
-                player.sendTitle("§c" + wave, "§7第 " + room.displayIndex + " 间", 5, 30, 10);
+                List<String> names = tierFor(slot).roomNames();
+                String title = room.displayIndex > 0 && room.displayIndex <= names.size() ? names.get(room.displayIndex - 1) : "§c" + wave;
+                player.sendTitle(waveIndex == 0 ? title : "§c" + wave, "§7第 " + room.displayIndex + " 间", 5, 30, 10);
                 player.playSound(player.getLocation(), Sound.ENTITY_ENDERMAN_TELEPORT, 0.8f, 0.8f);
             }
         }
@@ -1262,7 +1282,7 @@ public final class Instances {
                 room.wavePending = false;
                 for (LivingEntity entity : room.entities.values()) {
                     PlayerHits.forget(entity);
-                    if (!entity.isDead()) { entity.remove(); }
+                    if (!entity.isDead()) { MythicMobsSupport.remove(entity); }
                 }
                 room.entities.clear();
                 room.mobRecovery.clear();

@@ -754,11 +754,23 @@ public final class SelfTest {
                     int lastWave = finalRoom.waves.size() - 1;
                     DungeonBuilder.spawnWave(world, finalRoom, lastWave, checkedTier);
                     int expected = finalRoom.waves.get(lastWave).size() + 1;
+                    boolean mythic = finalRoom.bossEntity != null && MythicMobsSupport.managed(finalRoom.bossEntity);
+                    boolean healthValid = finalRoom.bossEntity != null && (mythic
+                            ? finalRoom.bossEntity.getHealth() > 0 && finalRoom.bossEntity.getHealth()
+                                <= finalRoom.bossEntity.getAttribute(org.bukkit.attribute.Attribute.GENERIC_MAX_HEALTH).getValue()
+                            : Math.abs(finalRoom.bossEntity.getHealth() - checkedTier.bossHealth()) < 0.01);
                     allOk &= line(report, finalRoom.bossEntity != null && finalRoom.bossEntity.isValid()
-                                    && Math.abs(finalRoom.bossEntity.getHealth() - checkedTier.bossHealth()) < 0.01
+                                    && healthValid
                                     && finalRoom.mobs.size() == expected,
-                            "★ M8 " + tierId + " 末关完整一波成功：护卫与首领共 " + expected + " 只",
-                            "M8 " + tierId + " 末关生成失败：" + (finalRoom.lastBossFailure == null ? "实体或数量不符" : finalRoom.lastBossFailure.getMessage()));
+                            "★ M8 " + tierId + " 末关完整一波成功：护卫与首领共 " + expected + " 只"
+                                    + (mythic ? "；首领由" + MythicMobsSupport.identity(finalRoom.bossEntity)
+                                        + "管理血量 " + finalRoom.bossEntity.getHealth() : ""),
+                            "M8 " + tierId + " 末关生成失败：" + (finalRoom.lastBossFailure == null
+                                    ? "数量=" + finalRoom.mobs.size() + "/" + expected + "，首领="
+                                    + (finalRoom.bossEntity == null ? "null" : finalRoom.bossEntity.getHealth() + "/"
+                                            + finalRoom.bossEntity.getAttribute(org.bukkit.attribute.Attribute.GENERIC_MAX_HEALTH).getValue()
+                                            + "，Mythic=" + MythicMobsSupport.identity(finalRoom.bossEntity))
+                                    : finalRoom.lastBossFailure.getMessage()));
                 } catch (RuntimeException e) {
                     allOk &= line(report, false, "", "M8 " + tierId + " 末关整波异常：" + e.getMessage());
                 } finally { finalRoom.entities.values().forEach(org.bukkit.entity.Entity::remove); }
@@ -857,7 +869,9 @@ public final class SelfTest {
             Tier loaded = plugin.tier("iron");
             if (loaded != null) {
                 var disk = SafeYaml.read(new File(plugin.getDataFolder(), "config.yml"));
-                double diskHealth = MobHealth.read(disk, "tiers.iron.boss.health", 60);
+                var source = DungeonFiles.load(plugin.getDataFolder()).documents().get("iron");
+                double diskHealth = source != null && source.enabled()
+                        ? MobHealth.read(source.legacy(), "boss.health", 60) : MobHealth.read(disk, "tiers.iron.boss.health", 60);
                 ok &= line(report, loaded.bossHealth() == diskHealth,
                         "★ M8 iron 生效配置与磁盘一致：首领血量 " + diskHealth,
                         "M8 iron 配置未生效：磁盘 " + diskHealth + " / 内存 " + loaded.bossHealth()
@@ -972,7 +986,7 @@ public final class SelfTest {
         slot.busy = true; slot.settings = plugin.tier("iron"); slot.dungeon = new Dungeon();
         Dungeon.Room room = new Dungeon.Room(1);
         room.displayIndex = 2; room.started = true; room.origin = point.clone().add(-6, -1, -6);
-        room.waves.add(List.of(org.bukkit.entity.EntityType.SKELETON, org.bukkit.entity.EntityType.SKELETON));
+        room.waves.add(List.of("SKELETON", "SKELETON"));
         slot.dungeon.rooms.add(room);
         var worldField = Instances.class.getDeclaredField("world"); worldField.setAccessible(true); worldField.set(instances, world);
         var slotsField = Instances.class.getDeclaredField("slots"); slotsField.setAccessible(true);

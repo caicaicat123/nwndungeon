@@ -47,6 +47,7 @@ public final class DungeonDef {
     public int maxConcurrentRuns = 8;
     /** 保存模板时超过这个体积就标红提醒（正常量级是几百 KB）。 */
     public int warnWorldSizeMb = 20;
+    public boolean structuredConfig;
 
     // —— 标记（关卡门 / 刷怪点 / 检查点 / 奖励箱 / 落点 / 首领位 / 出口门）——
     public final Markers markers = new Markers();
@@ -96,6 +97,7 @@ public final class DungeonDef {
         public String type = "ZOMBIE";
         public String name = "§c首领";
         public double health = 60;
+        public BossAttributes attributes;
         /** 首领登场前的小怪波。 */
         public final List<String> waves = new ArrayList<>();
         /** 随首领一起登场的护卫（{@code "ZOMBIE:3"}）。 */
@@ -109,6 +111,7 @@ public final class DungeonDef {
             spec.type = section.getString("type", "ZOMBIE");
             spec.name = section.getString("name", "§c首领");
             spec.health = MobHealth.read(section, "health", 60);
+            spec.attributes = BossAttributes.read(section);
             spec.waves.addAll(Stage.clean(section.getList("waves")));
             spec.guards = section.getString("guards", "");
             return spec;
@@ -149,6 +152,7 @@ public final class DungeonDef {
             return def;
         }
         def.display = section.getString("display", "§f" + name);
+        def.structuredConfig = section.getBoolean("structured-config", false);
         def.icon = section.getString("icon", "IRON_DOOR");
         def.worldEnabled = section.getBoolean("world.enabled", true);
         def.forceAdventure = section.getBoolean("world.force-adventure", true);
@@ -174,6 +178,7 @@ public final class DungeonDef {
         def.boss.type = boss.type;
         def.boss.name = boss.name;
         def.boss.health = boss.health;
+        def.boss.attributes = boss.attributes;
         def.boss.guards = boss.guards;
         def.boss.waves.addAll(boss.waves);
         // 顺便记下"每关配了几波"，校验时用来提示管理员（阵容那一段是只读的，插件不改写）
